@@ -1,0 +1,270 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum TourStatus {
+  PREPARATION
+  PRET_A_PARTIR
+  EN_TOURNEE
+  EN_ATTENTE_DECHARGEMENT
+  EN_ATTENTE_HYGIENE
+  TERMINEE
+}
+
+enum ConflictStatus {
+  EN_ATTENTE
+  PAYEE
+  ANNULE
+}
+
+// --- Auth Models (BetterAuth) ---
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  emailVerified Boolean?
+  image         String?
+  password_hash String?   // For mobile backend plain text auth (dev mode)
+  role          String    @default("AGENT_CONTROLE") // ADMIN, DIRECTION, AGENT_CONTROLE, AGENT_HYGIENE, SECURITE
+  banned        Boolean?
+  banReason     String?
+  banExpires    DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // BetterAuth relations
+  sessions      Session[]
+  accounts      Account[]
+
+  // Business relations
+  toursControle Tour[] @relation("AgentControle")
+  toursHygiene  Tour[] @relation("AgentHygiene")
+  toursSecuriteSortie Tour[] @relation("SecuriteSortie")
+  toursSecuriteEntree Tour[] @relation("SecuriteEntree")
+  notifications Notification[]
+  auditLogs     AuditLog[]
+
+  @@map("user")
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String
+  expiresAt DateTime
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([token])
+  @@map("session")
+}
+
+model Account {
+  id           String    @id @default(cuid())
+  userId       String
+  accountId    String
+  providerId   String
+  accessToken  String?
+  refreshToken String?
+  expiresAt    DateTime?
+  password     String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("account")
+}
+
+model Verification {
+  id         String   @id @default(cuid())
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@map("verification")
+}
+
+// --- Business Models ---
+
+model Driver {
+  id                          String   @id @default(uuid())
+  nom_complet                 String
+  matricule_par_defaut        String?
+  tolerance_caisses_mensuelle Int      @default(0)
+  createdAt                   DateTime @default(now())
+  updatedAt                   DateTime @updatedAt
+
+  tours Tour[]
+}
+
+model Secteur {
+  id        String   @id @default(uuid())
+  nom       String   @unique
+  tours     Tour[]
+}
+
+model CaisseConfig {
+  id         String @id @default(uuid())
+  nom        String
+  valeur_tnd Float
+}
+
+model Produit {
+  id           String   @id @default(uuid())
+  code_article String   @unique
+  nom          String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  lignesRetour LigneRetourProduit[]
+}
+
+model Tour {
+  id String @id @default(uuid())
+  
+  driverId String
+  driver   Driver @relation(fields: [driverId], references: [id])
+
+  secteurId String
+  secteur   Secteur @relation(fields: [secteurId], references: [id])
+
+  agentControleId String
+  agentControle   User   @relation("AgentControle", fields: [agentControleId], references: [id])
+
+  agentHygieneId String?
+  agentHygiene   User?   @relation("AgentHygiene", fields: [agentHygieneId], references: [id])
+
+  securiteIdSortie String?
+  securiteSortie   User?   @relation("SecuriteSortie", fields: [securiteIdSortie], references: [id])
+
+  securiteIdEntree String?
+  securiteEntree   User?   @relation("SecuriteEntree", fields: [securiteIdEntree], references: [id])
+
+  matricule_vehicule String
+
+  nbre_caisses_depart Int
+  nbre_caisses_retour Int?
+
+  poids_net_produits_depart Float
+  
+  poids_brut_securite_sortie Float?
+  poids_brut_securite_retour Float?
+  poids_tare_securite Float?
+  poids_net_total_calcule Float? // Brut Retour - Tare
+
+  photo_preuve_depart_url String?
+  photo_preuve_retour_url String?
+  photos_hygiene_urls     String[] // Array of photo URLs for hygiene checks
+  
+  notes_hygiene           String?
+  statut_hygiene          String? // APPROUVE, REJETE
+  
+  matricule_verifie_sortie Boolean @default(false)
+  matricule_verifie_retour Boolean @default(false)
+
+  date_sortie_securite DateTime?
+  date_entree_securite DateTime?
+
+  statut TourStatus @default(PREPARATION)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lignesRetour LigneRetourProduit[]
+  conflicts    Conflict[]
+}
+
+model LigneRetourProduit {
+  id String @id @default(uuid())
+  
+  tourId String
+  tour   Tour   @relation(fields: [tourId], references: [id])
+
+  produitId String
+  produit   Produit @relation(fields: [produitId], references: [id])
+
+  nbre_caisses      Int
+  poids_brut_retour Float
+  poids_net_retour  Float
+  note_etat         String?
+}
+
+model Conflict {
+  id String @id @default(uuid())
+
+  tourId String
+  tour   Tour   @relation(fields: [tourId], references: [id])
+
+  quantite_perdue   Int
+  montant_dette_tnd Float
+  
+  statut ConflictStatus @default(EN_ATTENTE)
+
+  notes_direction            String?
+  direction_id_approbation   String? 
+  date_approbation_direction DateTime?
+  depasse_tolerance          Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model AppConfig {
+  id    String @id @default(uuid())
+  key   String @unique
+  value String
+  
+  @@map("app_config")
+}
+
+model WiFiConfig {
+  id          String   @id @default(uuid())
+  ssid        String
+  bssid       String   // MAC address of the WiFi router (prevents SSID spoofing)
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([ssid, bssid])
+  @@map("wifi_config")
+}
+
+model Notification {
+  id String @id @default(uuid())
+  
+  userId String
+  user   User   @relation(fields: [userId], references: [id])
+
+  message String
+  isRead  Boolean @default(false)
+  
+  createdAt DateTime @default(now())
+}
+
+model AuditLog {
+  id String @id @default(uuid())
+  
+  userId String
+  user   User   @relation(fields: [userId], references: [id])
+
+  action        String
+  targetId      String?
+  details_avant String? 
+  details_apres String? 
+  
+  timestamp DateTime @default(now())
+}
