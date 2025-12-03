@@ -11,7 +11,7 @@ export default async function configRoutes(fastify: FastifyInstance) {
       const result = await query('SELECT * FROM app_configs');
       const config: Record<string, any> = {};
       
-      result.rows.forEach(row => {
+      result.rows.forEach((row: { key: string; value: string }) => {
         try {
           config[row.key] = JSON.parse(row.value);
         } catch {
