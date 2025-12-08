@@ -270,9 +270,12 @@ server.post('/api/tours/create', async (request, reply) => {
       marque_vehicule,
     } = request.body as any;
 
+    console.log('Tour create request:', { secteurId, agentControleId, matricule_vehicule, nbre_caisses_depart, driverId, driverName });
+
     // Validate required fields
     if (!secteurId || !agentControleId || !matricule_vehicule || !nbre_caisses_depart) {
-      return reply.code(400).send({ error: 'Champs requis manquants' });
+      console.log('Missing required fields:', { secteurId, agentControleId, matricule_vehicule, nbre_caisses_depart });
+      return reply.code(400).send({ error: 'Champs requis manquants', details: { secteurId, agentControleId, matricule_vehicule, nbre_caisses_depart } });
     }
 
     // If driverId is provided, use existing driver
@@ -280,28 +283,31 @@ server.post('/api/tours/create', async (request, reply) => {
 
     // If no driverId but driverName provided, create new driver
     if (!finalDriverId && driverName) {
+      console.log('Creating new driver:', driverName);
       const newDriver = await prisma.driver.create({
         data: {
           nom_complet: driverName,
           matricule_par_defaut: matricule_vehicule,
-          marque_vehicule: marque_vehicule || null,
         }
       });
       finalDriverId = newDriver.id;
+      console.log('New driver created:', finalDriverId);
     }
 
     if (!finalDriverId) {
+      console.log('No driver ID available');
       return reply.code(400).send({ error: 'Driver information required' });
     }
 
     // Create tour
+    console.log('Creating tour with driverId:', finalDriverId);
     const tour = await prisma.tour.create({
       data: {
         secteurId,
         matricule_vehicule,
         nbre_caisses_depart: parseInt(nbre_caisses_depart),
         poids_net_produits_depart: parseFloat(poids_net_produits_depart) || 0,
-        photo_depart_base64: photo_base64,
+        photo_preuve_depart_url: photo_base64 || null,
         statut: 'PREPARATION',
         agentControleId,
         driverId: finalDriverId,
@@ -313,10 +319,12 @@ server.post('/api/tours/create', async (request, reply) => {
       }
     });
 
+    console.log('Tour created successfully:', tour.id);
     return tour;
-  } catch (error) {
+  } catch (error: any) {
+    console.error('Error creating tour:', error.message, error.code);
     server.log.error('Error creating tour:', error);
-    return reply.code(500).send({ error: 'Erreur lors de la création de la tournée' });
+    return reply.code(500).send({ error: 'Erreur lors de la création de la tournée', details: error.message });
   }
 });
 
