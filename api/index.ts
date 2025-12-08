@@ -803,6 +803,88 @@ server.post('/api/conflicts/:id/reject', async (request, reply) => {
   }
 });
 
+// Register push notification token
+server.post('/api/notifications/register-token', async (request, reply) => {
+  try {
+    const authHeader = request.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return reply.code(401).send({ error: 'Token requis' });
+    }
+
+    const token = authHeader.split(' ')[1];
+    let decoded: any;
+    try {
+      decoded = server.jwt.verify(token);
+    } catch (e) {
+      return reply.code(401).send({ error: 'Token invalide' });
+    }
+
+    const { expoPushToken } = request.body as any;
+    
+    if (!expoPushToken) {
+      return reply.code(400).send({ error: 'Expo push token requis' });
+    }
+
+    // Update user with push token
+    await prisma.user.update({
+      where: { id: decoded.id },
+      data: { expoPushToken }
+    });
+
+    console.log(`[Notifications] Registered token for user ${decoded.email}: ${expoPushToken}`);
+    return { success: true, message: 'Token enregistré' };
+  } catch (error: any) {
+    console.error('Error registering push token:', error.message);
+    return reply.code(500).send({ error: 'Erreur lors de l\'enregistrement du token' });
+  }
+});
+
+// Get user notifications
+server.get('/api/notifications', async (request, reply) => {
+  try {
+    const authHeader = request.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return reply.code(401).send({ error: 'Token requis' });
+    }
+
+    const token = authHeader.split(' ')[1];
+    let decoded: any;
+    try {
+      decoded = server.jwt.verify(token);
+    } catch (e) {
+      return reply.code(401).send({ error: 'Token invalide' });
+    }
+
+    const notifications = await prisma.notification.findMany({
+      where: { userId: decoded.id },
+      orderBy: { createdAt: 'desc' },
+      take: 50
+    });
+
+    return notifications;
+  } catch (error: any) {
+    console.error('Error loading notifications:', error.message);
+    return reply.code(500).send({ error: 'Erreur lors du chargement des notifications' });
+  }
+});
+
+// Mark notification as read
+server.patch('/api/notifications/:id/read', async (request, reply) => {
+  try {
+    const { id } = request.params as any;
+
+    const notification = await prisma.notification.update({
+      where: { id },
+      data: { isRead: true }
+    });
+
+    return notification;
+  } catch (error: any) {
+    console.error('Error marking notification read:', error.message);
+    return reply.code(500).send({ error: 'Erreur' });
+  }
+});
+
 // Export for Vercel
 export default async function handler(req: any, res: any) {
   await server.ready();
