@@ -360,7 +360,7 @@ server.get('/api/dashboard/tours-active', async (request, reply) => {
     const activeTours = await prisma.tour.findMany({
       where: {
         createdAt: { gte: todayStart },
-        statut: { in: ['EN_COURS', 'EN_ATTENTE_RETOUR', 'EN_ATTENTE_PESEE_SORTIE', 'EN_ATTENTE_PESEE_ENTREE'] }
+        statut: { in: ['PREPARATION', 'PRET_A_PARTIR', 'EN_TOURNEE', 'EN_ATTENTE_DECHARGEMENT', 'EN_ATTENTE_HYGIENE'] }
       },
       include: {
         driver: true,
