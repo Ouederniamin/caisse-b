@@ -481,7 +481,6 @@ server.patch('/api/tours/:id/arrivee', async (request, reply) => {
       where: { id },
       data: {
         statut: 'EN_ATTENTE_DECHARGEMENT',
-        date_arrivee: new Date(),
       },
       include: {
         driver: true,
@@ -621,8 +620,8 @@ server.patch('/api/tours/:id/retour', async (request, reply) => {
           depasseTolerance: depasse_tolerance,
           isSurplus: caisses_manquantes < 0, // negative means surplus
         });
-      } catch (notifError) {
-        server.log.error('Failed to send conflict notification:', notifError);
+      } catch (notifError: unknown) {
+        server.log.error('Failed to send conflict notification: ' + String(notifError));
       }
     }
     
@@ -634,8 +633,8 @@ server.patch('/api/tours/:id/retour', async (request, reply) => {
           tour.driver?.nom_complet || 'Chauffeur inconnu',
           tour.matricule_vehicule || ''
         );
-      } catch (notifError) {
-        server.log.error('Failed to send hygiene notification:', notifError);
+      } catch (notifError: unknown) {
+        server.log.error('Failed to send hygiene notification: ' + String(notifError));
       }
     }
     
