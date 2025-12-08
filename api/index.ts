@@ -224,6 +224,91 @@ server.get('/api/secteurs', async (request, reply) => {
   }
 });
 
+// Dashboard KPIs endpoint
+server.get('/api/dashboard/kpis', async (request, reply) => {
+  try {
+    // Get today's date range
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+
+    // Count tours by status
+    const [
+      totalToursToday,
+      toursEnCours,
+      toursTermines,
+      toursEnAttente,
+      totalDrivers,
+      totalConflicts,
+      conflitsEnAttente
+    ] = await Promise.all([
+      // Total tours created today
+      prisma.tour.count({
+        where: {
+          createdAt: { gte: today, lt: tomorrow }
+        }
+      }),
+      // Tours currently in progress (EN_TOURNEE)
+      prisma.tour.count({
+        where: {
+          statut: 'EN_TOURNEE',
+          createdAt: { gte: today, lt: tomorrow }
+        }
+      }),
+      // Completed tours today
+      prisma.tour.count({
+        where: {
+          statut: 'TERMINEE',
+          createdAt: { gte: today, lt: tomorrow }
+        }
+      }),
+      // Tours waiting (PREPARATION, PRET_A_PARTIR, EN_ATTENTE_*)
+      prisma.tour.count({
+        where: {
+          statut: { in: ['PREPARATION', 'PRET_A_PARTIR', 'EN_ATTENTE_DECHARGEMENT', 'EN_ATTENTE_HYGIENE'] },
+          createdAt: { gte: today, lt: tomorrow }
+        }
+      }),
+      // Total active drivers
+      prisma.driver.count(),
+      // Total conflicts
+      prisma.conflict.count(),
+      // Pending conflicts
+      prisma.conflict.count({
+        where: { statut: 'EN_ATTENTE' }
+      })
+    ]);
+
+    // Calculate total crates today
+    const caissesToday = await prisma.tour.aggregate({
+      where: {
+        createdAt: { gte: today, lt: tomorrow }
+      },
+      _sum: {
+        nbre_caisses_depart: true,
+        nbre_caisses_retour: true
+      }
+    });
+
+    return {
+      toursAujourdHui: totalToursToday,
+      toursEnCours,
+      toursTermines,
+      toursEnAttente,
+      totalChauffeurs: totalDrivers,
+      caissesDepart: caissesToday._sum.nbre_caisses_depart || 0,
+      caissesRetour: caissesToday._sum.nbre_caisses_retour || 0,
+      conflitsTotal: totalConflicts,
+      conflitsEnAttente,
+      timestamp: new Date().toISOString()
+    };
+  } catch (error) {
+    server.log.error(error);
+    return reply.code(500).send({ error: 'Erreur lors du chargement des KPIs' });
+  }
+});
+
 // Get next serie number for matricules
 server.get('/api/matricules/next-serie', async (request, reply) => {
   try {
