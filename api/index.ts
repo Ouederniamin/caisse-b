@@ -192,6 +192,19 @@ server.get('/drivers', async (request, reply) => {
   }
 });
 
+// Get drivers (with /api prefix for consistency)
+server.get('/api/drivers', async (request, reply) => {
+  try {
+    const drivers = await prisma.driver.findMany({
+      orderBy: { nom_complet: 'asc' },
+    });
+    return drivers;
+  } catch (error) {
+    server.log.error(error);
+    return reply.code(500).send({ error: 'Erreur serveur' });
+  }
+});
+
 // Get secteurs  
 server.get('/api/secteurs', async (request, reply) => {
   try {
@@ -205,8 +218,45 @@ server.get('/api/secteurs', async (request, reply) => {
   }
 });
 
+// Get next serie number for matricules
+server.get('/api/matricules/next-serie', async (request, reply) => {
+  try {
+    // Get the latest tour to determine next serie
+    const latestTour = await prisma.tour.findFirst({
+      where: {
+        matricule_vehicule: {
+          not: null
+        }
+      },
+      orderBy: {
+        createdAt: 'desc'
+      }
+    });
+
+    let nextSerie = '253'; // Default starting serie
+    
+    if (latestTour?.matricule_vehicule) {
+      // Extract serie from matricule format: "123 تونس 4567"
+      const parts = latestTour.matricule_vehicule.split(' ');
+      if (parts.length >= 1) {
+        const currentSerie = parts[0];
+        const serieNum = parseInt(currentSerie, 10);
+        if (!isNaN(serieNum)) {
+          nextSerie = (serieNum + 1).toString();
+        }
+      }
+    }
+
+    return { next_serie: nextSerie };
+  } catch (error) {
+    server.log.error(error);
+    return reply.code(500).send({ error: 'Erreur serveur' });
+  }
+});
+
 // Export for Vercel
 export default async function handler(req: any, res: any) {
   await server.ready();
   server.server.emit('request', req, res);
 }
+
