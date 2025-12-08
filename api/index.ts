@@ -309,6 +309,33 @@ server.get('/api/dashboard/kpis', async (request, reply) => {
   }
 });
 
+// Dashboard urgent conflicts endpoint
+server.get('/api/dashboard/conflicts-urgent', async (request, reply) => {
+  try {
+    // Get pending conflicts that need attention
+    const urgentConflicts = await prisma.conflict.findMany({
+      where: { 
+        statut: 'EN_ATTENTE'
+      },
+      include: {
+        tour: {
+          include: {
+            driver: true,
+            secteur: true,
+          }
+        }
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 10
+    });
+
+    return urgentConflicts;
+  } catch (error: any) {
+    console.error('Error loading urgent conflicts:', error.message);
+    return reply.code(500).send({ error: 'Erreur lors du chargement des conflits urgents' });
+  }
+});
+
 // Get next serie number for matricules
 server.get('/api/matricules/next-serie', async (request, reply) => {
   try {
