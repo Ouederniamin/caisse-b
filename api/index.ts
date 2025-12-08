@@ -242,15 +242,81 @@ server.get('/api/matricules/next-serie', async (request, reply) => {
         const currentSerie = parts[0];
         const serieNum = parseInt(currentSerie, 10);
         if (!isNaN(serieNum)) {
-          nextSerie = (serieNum + 1).toString();
+          nextSerie = (serieNum + 1).toString().padStart(3, '0');
         }
       }
     }
 
     return { next_serie: nextSerie };
   } catch (error) {
-    server.log.error(error);
-    return reply.code(500).send({ error: 'Erreur serveur' });
+    server.log.error('Error in next-serie:', error);
+    // Return default serie on error
+    return { next_serie: '253' };
+  }
+});
+
+// Create tour (mobile app)
+server.post('/api/tours/create', async (request, reply) => {
+  try {
+    const {
+      secteurId,
+      agentControleId,
+      matricule_vehicule,
+      nbre_caisses_depart,
+      poids_net_produits_depart,
+      photo_base64,
+      driverId,
+      driverName,
+      marque_vehicule,
+    } = request.body as any;
+
+    // Validate required fields
+    if (!secteurId || !agentControleId || !matricule_vehicule || !nbre_caisses_depart) {
+      return reply.code(400).send({ error: 'Champs requis manquants' });
+    }
+
+    // If driverId is provided, use existing driver
+    let finalDriverId = driverId;
+
+    // If no driverId but driverName provided, create new driver
+    if (!finalDriverId && driverName) {
+      const newDriver = await prisma.driver.create({
+        data: {
+          nom_complet: driverName,
+          matricule_par_defaut: matricule_vehicule,
+          marque_vehicule: marque_vehicule || null,
+        }
+      });
+      finalDriverId = newDriver.id;
+    }
+
+    if (!finalDriverId) {
+      return reply.code(400).send({ error: 'Driver information required' });
+    }
+
+    // Create tour
+    const tour = await prisma.tour.create({
+      data: {
+        secteurId,
+        matricule_vehicule,
+        nbre_caisses_depart: parseInt(nbre_caisses_depart),
+        poids_net_produits_depart: parseFloat(poids_net_produits_depart) || 0,
+        photo_depart_base64: photo_base64,
+        statut: 'PREPARATION',
+        agentControleId,
+        driverId: finalDriverId,
+      },
+      include: {
+        driver: true,
+        secteur: true,
+        agentControle: true,
+      }
+    });
+
+    return tour;
+  } catch (error) {
+    server.log.error('Error creating tour:', error);
+    return reply.code(500).send({ error: 'Erreur lors de la création de la tournée' });
   }
 });
 
