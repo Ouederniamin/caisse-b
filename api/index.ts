@@ -373,10 +373,10 @@ server.get('/api/dashboard/conflict/:id', async (request, reply) => {
 
     // Get driver history if driver exists
     let driverHistory = null;
-    if (conflict.tour?.driver_id) {
+    if (conflict.tour?.driverId) {
       const driverConflicts = await prisma.conflict.findMany({
         where: {
-          tour: { driver_id: conflict.tour.driver_id }
+          tour: { driverId: conflict.tour.driverId }
         },
         include: {
           tour: {
@@ -388,12 +388,12 @@ server.get('/api/dashboard/conflict/:id', async (request, reply) => {
       });
 
       const driverTours = await prisma.tour.count({
-        where: { driver_id: conflict.tour.driver_id }
+        where: { driverId: conflict.tour.driverId }
       });
 
       const completedTours = await prisma.tour.count({
         where: { 
-          driver_id: conflict.tour.driver_id,
+          driverId: conflict.tour.driverId,
           statut: 'TERMINEE'
         }
       });
