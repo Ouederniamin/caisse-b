@@ -3,11 +3,17 @@ import cors from '@fastify/cors';
 import jwt from '@fastify/jwt';
 import dotenv from 'dotenv';
 import { PrismaClient } from '@prisma/client';
+import { UTApi } from 'uploadthing/server';
 
 dotenv.config();
 
 // Initialize Prisma
 const prisma = new PrismaClient();
+
+// Initialize UploadThing
+const utapi = new UTApi({
+  token: process.env.UPLOADTHING_TOKEN,
+});
 
 const server = Fastify({
   logger: true,
@@ -299,6 +305,37 @@ server.post('/api/tours/create', async (request, reply) => {
       return reply.code(400).send({ error: 'Driver information required' });
     }
 
+    // Upload photo to UploadThing if provided
+    let photoUrl: string | null = null;
+    if (photo_base64) {
+      try {
+        console.log('Uploading photo to UploadThing...');
+        // Extract base64 data from data URL
+        const base64Data = photo_base64.replace(/^data:image\/\w+;base64,/, '');
+        const buffer = Buffer.from(base64Data, 'base64');
+        
+        // Create a File-like object for UploadThing
+        const blob = new Blob([buffer], { type: 'image/jpeg' });
+        const file = new File([blob], `tour_depart_${Date.now()}.jpg`, { type: 'image/jpeg' });
+        
+        // Upload using UploadThing API
+        const uploadResult = await utapi.uploadFiles([file]);
+        
+        if (uploadResult[0]?.data?.ufsUrl) {
+          photoUrl = uploadResult[0].data.ufsUrl;
+          console.log('Photo uploaded successfully:', photoUrl);
+        } else if (uploadResult[0]?.data?.url) {
+          photoUrl = uploadResult[0].data.url;
+          console.log('Photo uploaded successfully (alt):', photoUrl);
+        } else {
+          console.warn('Upload succeeded but no URL returned:', uploadResult);
+        }
+      } catch (uploadError: any) {
+        console.error('Photo upload failed:', uploadError.message);
+        // Continue without photo if upload fails
+      }
+    }
+
     // Create tour
     console.log('Creating tour with driverId:', finalDriverId);
     const tour = await prisma.tour.create({
@@ -307,7 +344,7 @@ server.post('/api/tours/create', async (request, reply) => {
         matricule_vehicule,
         nbre_caisses_depart: parseInt(nbre_caisses_depart),
         poids_net_produits_depart: parseFloat(poids_net_produits_depart) || 0,
-        photo_preuve_depart_url: photo_base64 || null,
+        photo_preuve_depart_url: photoUrl,
         statut: 'PREPARATION',
         agentControleId,
         driverId: finalDriverId,
