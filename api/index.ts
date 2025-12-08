@@ -416,6 +416,308 @@ server.patch('/api/tours/:id/status', async (request, reply) => {
   }
 });
 
+// Security exit weighing (sortie)
+server.patch('/api/tours/:id/sortie', async (request, reply) => {
+  try {
+    const { id } = request.params as any;
+    const { poids_brut_securite_sortie, matricule_vehicule } = request.body as any;
+    
+    const tour = await prisma.tour.update({
+      where: { id },
+      data: {
+        poids_brut_securite_sortie: parseFloat(poids_brut_securite_sortie),
+        matricule_verifie_sortie: true,
+        date_sortie_securite: new Date(),
+        statut: 'EN_TOURNEE',
+      },
+      include: {
+        driver: true,
+        secteur: true,
+      }
+    });
+    
+    return tour;
+  } catch (error: any) {
+    console.error('Error processing sortie:', error.message);
+    return reply.code(500).send({ error: 'Erreur lors de la pesée sortie', details: error.message });
+  }
+});
+
+// Security authorize exit (without weighing)
+server.patch('/api/tours/:id/exit', async (request, reply) => {
+  try {
+    const { id } = request.params as any;
+    
+    const tour = await prisma.tour.update({
+      where: { id },
+      data: {
+        date_sortie_finale: new Date(),
+      },
+      include: {
+        driver: true,
+        secteur: true,
+      }
+    });
+    
+    return tour;
+  } catch (error: any) {
+    console.error('Error authorizing exit:', error.message);
+    return reply.code(500).send({ error: 'Erreur lors de l\'autorisation de sortie', details: error.message });
+  }
+});
+
+// Security entry weighing (entree/retour)
+server.patch('/api/tours/:id/entree', async (request, reply) => {
+  try {
+    const { id } = request.params as any;
+    const { poids_brut_securite_entree, matricule_vehicule } = request.body as any;
+    
+    const tour = await prisma.tour.update({
+      where: { id },
+      data: {
+        poids_brut_securite_retour: parseFloat(poids_brut_securite_entree),
+        matricule_verifie_retour: true,
+        date_entree_securite: new Date(),
+        statut: 'EN_ATTENTE_DECHARGEMENT',
+      },
+      include: {
+        driver: true,
+        secteur: true,
+      }
+    });
+    
+    return tour;
+  } catch (error: any) {
+    console.error('Error processing entree:', error.message);
+    return reply.code(500).send({ error: 'Erreur lors de la pesée entrée', details: error.message });
+  }
+});
+
+// Agent controle retour (crate count and photo)
+server.patch('/api/tours/:id/retour', async (request, reply) => {
+  try {
+    const { id } = request.params as any;
+    const { 
+      nbre_caisses_retour, 
+      has_chicken_products, 
+      photo_preuve_retour_base64, 
+      photo_preuve_retour_url 
+    } = request.body as any;
+    
+    // Upload photo if base64 provided
+    let photoUrl = photo_preuve_retour_url || null;
+    if (photo_preuve_retour_base64) {
+      try {
+        const base64Data = photo_preuve_retour_base64.replace(/^data:image\/\w+;base64,/, '');
+        const buffer = Buffer.from(base64Data, 'base64');
+        const blob = new Blob([buffer], { type: 'image/jpeg' });
+        const file = new File([blob], `tour_retour_${Date.now()}.jpg`, { type: 'image/jpeg' });
+        
+        const uploadResult = await utapi.uploadFiles([file]);
+        photoUrl = uploadResult[0]?.data?.ufsUrl || uploadResult[0]?.data?.url || null;
+      } catch (uploadError: any) {
+        console.warn('Photo upload failed:', uploadError.message);
+      }
+    }
+    
+    // Determine next status based on chicken products
+    const nextStatus = has_chicken_products ? 'EN_ATTENTE_HYGIENE' : 'TERMINEE';
+    
+    // Get existing tour to calculate conflicts
+    const existingTour = await prisma.tour.findUnique({
+      where: { id },
+      include: { driver: true }
+    });
+    
+    if (!existingTour) {
+      return reply.code(404).send({ error: 'Tournée non trouvée' });
+    }
+    
+    const difference = existingTour.nbre_caisses_depart - parseInt(nbre_caisses_retour);
+    const tolerance = existingTour.driver?.tolerance_caisses_mensuelle || 0;
+    
+    // Create conflict if crate difference exceeds tolerance
+    if (difference > tolerance) {
+      await prisma.conflict.create({
+        data: {
+          tourId: id,
+          quantite_perdue: difference,
+          montant_dette_tnd: difference * 50, // Example: 50 TND per crate
+          depasse_tolerance: true,
+          statut: 'EN_ATTENTE',
+        }
+      });
+    }
+    
+    const tour = await prisma.tour.update({
+      where: { id },
+      data: {
+        nbre_caisses_retour: parseInt(nbre_caisses_retour),
+        photo_preuve_retour_url: photoUrl,
+        statut: nextStatus,
+      },
+      include: {
+        driver: true,
+        secteur: true,
+        conflicts: true,
+      }
+    });
+    
+    return tour;
+  } catch (error: any) {
+    console.error('Error processing retour:', error.message);
+    return reply.code(500).send({ error: 'Erreur lors de l\'enregistrement du retour', details: error.message });
+  }
+});
+
+// Agent hygiene validation
+server.patch('/api/tours/:id/hygiene', async (request, reply) => {
+  try {
+    const { id } = request.params as any;
+    const { agentHygieneId, photos_hygiene_urls, notes_hygiene, statut_hygiene } = request.body as any;
+    
+    const tour = await prisma.tour.update({
+      where: { id },
+      data: {
+        agentHygieneId,
+        photos_hygiene_urls: photos_hygiene_urls || [],
+        notes_hygiene,
+        statut_hygiene,
+        statut: 'TERMINEE',
+      },
+      include: {
+        driver: true,
+        secteur: true,
+        agentHygiene: true,
+      }
+    });
+    
+    return tour;
+  } catch (error: any) {
+    console.error('Error processing hygiene:', error.message);
+    return reply.code(500).send({ error: 'Erreur lors de la validation hygiène', details: error.message });
+  }
+});
+
+// Get conflicts list
+server.get('/api/conflicts', async (request, reply) => {
+  try {
+    const { status } = request.query as any;
+    
+    const where: any = {};
+    if (status) where.statut = status;
+    
+    const conflicts = await prisma.conflict.findMany({
+      where,
+      include: {
+        tour: {
+          include: {
+            driver: true,
+            secteur: true,
+          }
+        }
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    
+    return conflicts;
+  } catch (error: any) {
+    console.error('Error loading conflicts:', error.message);
+    return reply.code(500).send({ error: 'Erreur lors du chargement des conflits' });
+  }
+});
+
+// Get conflict by ID
+server.get('/api/conflicts/:id', async (request, reply) => {
+  try {
+    const { id } = request.params as any;
+    
+    const conflict = await prisma.conflict.findUnique({
+      where: { id },
+      include: {
+        tour: {
+          include: {
+            driver: true,
+            secteur: true,
+            agentControle: true,
+          }
+        }
+      }
+    });
+    
+    if (!conflict) {
+      return reply.code(404).send({ error: 'Conflit non trouvé' });
+    }
+    
+    return conflict;
+  } catch (error: any) {
+    console.error('Error loading conflict:', error.message);
+    return reply.code(500).send({ error: 'Erreur lors du chargement du conflit' });
+  }
+});
+
+// Approve conflict (Direction)
+server.post('/api/conflicts/:id/approve', async (request, reply) => {
+  try {
+    const { id } = request.params as any;
+    const { notes } = request.body as any;
+    
+    const conflict = await prisma.conflict.update({
+      where: { id },
+      data: {
+        statut: 'PAYEE',
+        notes_direction: notes || '',
+        date_approbation_direction: new Date(),
+      },
+      include: {
+        tour: {
+          include: {
+            driver: true,
+          }
+        }
+      }
+    });
+    
+    return conflict;
+  } catch (error: any) {
+    console.error('Error approving conflict:', error.message);
+    return reply.code(500).send({ error: 'Erreur lors de l\'approbation du conflit', details: error.message });
+  }
+});
+
+// Reject conflict (Direction)
+server.post('/api/conflicts/:id/reject', async (request, reply) => {
+  try {
+    const { id } = request.params as any;
+    const { notes } = request.body as any;
+    
+    if (!notes || !notes.trim()) {
+      return reply.code(400).send({ error: 'Une raison est obligatoire pour rejeter' });
+    }
+    
+    const conflict = await prisma.conflict.update({
+      where: { id },
+      data: {
+        statut: 'ANNULE',
+        notes_direction: notes,
+        date_approbation_direction: new Date(),
+      },
+      include: {
+        tour: {
+          include: {
+            driver: true,
+          }
+        }
+      }
+    });
+    
+    return conflict;
+  } catch (error: any) {
+    console.error('Error rejecting conflict:', error.message);
+    return reply.code(500).send({ error: 'Erreur lors du rejet du conflit', details: error.message });
+  }
+});
+
 // Export for Vercel
 export default async function handler(req: any, res: any) {
   await server.ready();
