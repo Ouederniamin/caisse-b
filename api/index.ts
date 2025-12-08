@@ -333,7 +333,7 @@ server.get('/api/dashboard/conflicts-urgent', async (request, reply) => {
     const formattedConflicts = urgentConflicts.map(conflict => ({
       id: conflict.id,
       tourId: conflict.tour_id,
-      driver: conflict.tour?.driver?.nom || 'Chauffeur inconnu',
+      driver: conflict.tour?.driver?.nom_complet || 'Chauffeur inconnu',
       secteur: conflict.tour?.secteur?.nom || 'Secteur inconnu',
       matricule: conflict.tour?.matricule_vehicule || '',
       quantite_perdue: conflict.quantite_perdue || 0,
@@ -411,7 +411,7 @@ server.get('/api/dashboard/conflict/:id', async (request, reply) => {
       driverHistory = {
         driver: {
           id: conflict.tour.driver?.id,
-          nom_complet: conflict.tour.driver?.nom || 'Non assigné',
+          nom_complet: conflict.tour.driver?.nom_complet || 'Non assigné',
           matricule_par_defaut: conflict.tour.driver?.matricule_par_defaut || null,
           tolerance_caisses_mensuelle: conflict.tour.driver?.tolerance_caisses_mensuelle || 0
         },
@@ -491,7 +491,7 @@ server.get('/api/dashboard/tours-active', async (request, reply) => {
     // Format for mobile app
     const formattedTours = activeTours.map(tour => ({
       id: tour.id,
-      driver: tour.driver?.nom || 'Chauffeur inconnu',
+      driver: tour.driver?.nom_complet || 'Chauffeur inconnu',
       secteur: tour.secteur?.nom || 'Secteur inconnu',
       matricule: tour.matricule_vehicule || '',
       statut: tour.statut,
