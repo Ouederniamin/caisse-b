@@ -205,4 +205,7 @@ export default async function tourRoutes(fastify: FastifyInstance) {
       return reply.code(500).send({ error: 'Failed to complete return' });
     }
   });
+
+  // Note: /sortie and /entree endpoints are defined in server.ts
+  // They use Prisma ORM and support both web and mobile clients
 }

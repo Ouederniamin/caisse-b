@@ -1,14 +1,25 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import jwt from '@fastify/jwt';
+import fastifyStatic from '@fastify/static';
 import dotenv from 'dotenv';
 import prisma from './lib/prisma';
+import { notificationService } from './services/notificationService';
+import path from 'path';
+import fs from 'fs';
 
 dotenv.config();
 
 const server = Fastify({
-  logger: true
+  logger: true,
+  bodyLimit: 50 * 1024 * 1024, // 50MB for base64 images
 });
+
+// Ensure uploads directory exists
+const uploadsDir = path.join(__dirname, '..', 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+}
 
 // Register plugins
 server.register(cors, {
@@ -17,6 +28,12 @@ server.register(cors, {
 
 server.register(jwt, {
   secret: process.env.JWT_SECRET || 'supersecret'
+});
+
+// Serve static files from uploads directory
+server.register(fastifyStatic, {
+  root: uploadsDir,
+  prefix: '/uploads/',
 });
 
 // Health check
@@ -53,54 +70,48 @@ server.get('/config/wifi-security-status', async (request, reply) => {
   }
 });
 
-// Mobile Login endpoint
-// Mobile login endpoint
+// Mobile Login endpoint - calls web BetterAuth for password verification
 server.post('/api/mobile/login', async (request, reply) => {
   try {
     const { email, password } = request.body as any;
+    
+    console.log('[Mobile Login] Attempt for:', email);
     
     if (!email || !password) {
       return reply.code(400).send({ error: 'Email et mot de passe requis' });
     }
 
-    // Find user by email
+    // Call the web app's BetterAuth endpoint to verify credentials
+    const webAuthUrl = process.env.WEB_AUTH_URL || 'http://localhost:3000';
+    
+    try {
+      const signInResponse = await fetch(`${webAuthUrl}/api/auth/sign-in/email`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      });
+      
+      if (!signInResponse.ok) {
+        console.log('[Mobile Login] Web BetterAuth signIn failed:', signInResponse.status);
+        return reply.code(401).send({ error: 'Email ou mot de passe incorrect' });
+      }
+      
+      console.log('[Mobile Login] Web BetterAuth signIn success');
+    } catch (fetchError) {
+      console.error('[Mobile Login] Failed to reach web auth:', fetchError);
+      return reply.code(503).send({ error: 'Service d\'authentification non disponible' });
+    }
+
+    // Get user from database for JWT
     const user = await prisma.user.findUnique({
       where: { email }
     });
 
     if (!user) {
-      return reply.code(401).send({ error: 'Email ou mot de passe incorrect' });
+      return reply.code(401).send({ error: 'Utilisateur non trouvé' });
     }
 
-    // DEV MODE: Compare plain text password (in production, use bcrypt)
-    // Check password_hash field first (for mobile backend users)
-    // If no password_hash, check Account table (for BetterAuth web users)
-    let isValid = false;
-    
-    if (user.password_hash) {
-      // Mobile backend user with plain password
-      isValid = user.password_hash === password;
-    } else {
-      // Web user - need to check Account table (BetterAuth)
-      const account = await prisma.account.findFirst({
-        where: { 
-          userId: user.id,
-          providerId: 'credential'
-        }
-      });
-      
-      if (account?.password) {
-        // BetterAuth uses bcrypt - need to import bcrypt for production
-        // For now in dev, just reject web users from mobile login
-        return reply.code(401).send({ 
-          error: 'Utilisez l\'application web pour vous connecter avec ce compte' 
-        });
-      }
-    }
-    
-    if (!isValid) {
-      return reply.code(401).send({ error: 'Email ou mot de passe incorrect' });
-    }
+    console.log('[Mobile Login] Success for:', email, 'role:', user.role);
     
     // Check if user has valid role for mobile app
     const validRoles = ['AGENT_CONTROLE', 'AGENT_HYGIENE', 'SECURITE', 'ADMIN', 'DIRECTION'];
@@ -110,7 +121,7 @@ server.post('/api/mobile/login', async (request, reply) => {
       });
     }
 
-    // Generate JWT token
+    // Generate JWT token for mobile app
     const token = server.jwt.sign({ 
       id: user.id,
       email: user.email, 
@@ -208,6 +219,42 @@ server.get('/api/tours/:id', async (request, reply) => {
   }
 });
 
+// Find driver by matricule
+server.get('/api/drivers/by-matricule', async (request, reply) => {
+  try {
+    const { matricule } = request.query as any;
+    
+    if (!matricule) {
+      return reply.code(400).send({ error: 'Matricule requis' });
+    }
+    
+    // Find driver that has this matricule as default
+    const driver = await prisma.driver.findFirst({
+      where: { matricule_par_defaut: matricule },
+    });
+    
+    if (driver) {
+      return { driver };
+    }
+    
+    // If not found by default matricule, check in recent tours
+    const recentTour = await prisma.tour.findFirst({
+      where: { matricule_vehicule: matricule },
+      orderBy: { createdAt: 'desc' },
+      include: { driver: true },
+    });
+    
+    if (recentTour?.driver) {
+      return { driver: recentTour.driver };
+    }
+    
+    return { driver: null };
+  } catch (error) {
+    server.log.error(error);
+    return reply.code(500).send({ error: 'Erreur serveur' });
+  }
+});
+
 // Create new tour (Agent Contrôle)
 server.post('/api/tours/create', async (request, reply) => {
   try {
@@ -219,23 +266,66 @@ server.post('/api/tours/create', async (request, reply) => {
       nbre_caisses_depart,
       poids_net_produits_depart,
       photo_preuve_depart_url,
+      photo_base64,
+      driverName,
+      marque_vehicule,
     } = request.body as any;
     
     // Validation
-    if (!driverId || !secteurId || !agentControleId || !matricule_vehicule || 
-        !nbre_caisses_depart || !poids_net_produits_depart) {
-      return reply.code(400).send({ error: 'Tous les champs sont requis' });
+    if (!secteurId || !agentControleId || !matricule_vehicule || !nbre_caisses_depart) {
+      return reply.code(400).send({ error: 'Secteur, agent, matricule et nombre de caisses sont requis' });
+    }
+    
+    // Handle driver - create new if not exists
+    let finalDriverId = driverId;
+    if (!driverId && driverName) {
+      // Create new driver
+      const newDriver = await prisma.driver.create({
+        data: {
+          nom_complet: driverName,
+          matricule_par_defaut: matricule_vehicule,
+          marque_vehicule: marque_vehicule || null,
+        },
+      });
+      finalDriverId = newDriver.id;
+    }
+    
+    // Handle photo upload - save base64 as data URL or file
+    let photoUrl = photo_preuve_depart_url;
+    if (photo_base64) {
+      // Save base64 image to file system
+      const fs = require('fs');
+      const path = require('path');
+      const uploadsDir = path.join(__dirname, '..', 'uploads');
+      
+      // Create uploads directory if it doesn't exist
+      if (!fs.existsSync(uploadsDir)) {
+        fs.mkdirSync(uploadsDir, { recursive: true });
+      }
+      
+      // Generate unique filename
+      const filename = `tour_depart_${Date.now()}_${Math.random().toString(36).substr(2, 9)}.jpg`;
+      const filePath = path.join(uploadsDir, filename);
+      
+      // Remove data URL prefix if present
+      const base64Data = photo_base64.replace(/^data:image\/\w+;base64,/, '');
+      
+      // Write file
+      fs.writeFileSync(filePath, base64Data, 'base64');
+      
+      // Set URL for serving
+      photoUrl = `/uploads/${filename}`;
     }
     
     const tour = await prisma.tour.create({
       data: {
-        driverId,
+        driverId: finalDriverId || null,
         secteurId,
         agentControleId,
         matricule_vehicule,
-        nbre_caisses_depart,
-        poids_net_produits_depart,
-        photo_preuve_depart_url,
+        nbre_caisses_depart: parseInt(nbre_caisses_depart),
+        poids_net_produits_depart: poids_net_produits_depart || 0,
+        photo_preuve_depart_url: photoUrl,
         statut: 'PREPARATION',
       },
       include: {
@@ -273,24 +363,40 @@ server.patch('/api/tours/:id/pret', async (request, reply) => {
 server.patch('/api/tours/:id/sortie', async (request, reply) => {
   try {
     const { id } = request.params as any;
-    const {
-      securiteIdSortie,
-      poids_brut_securite_sortie,
-      matricule_verifie,
-    } = request.body as any;
+    const body = request.body as any;
     
-    if (!securiteIdSortie || !poids_brut_securite_sortie || matricule_verifie === undefined) {
-      return reply.code(400).send({ error: 'Données manquantes' });
+    // Support both formats: from web (securiteIdSortie) and mobile (userId from token)
+    const user = (request as any).user;
+    const securiteIdSortie = body.securiteIdSortie || user?.id;
+    const poids_brut_securite_sortie = body.poids_brut_securite_sortie;
+    const matricule_verifie = body.matricule_verifie !== undefined ? body.matricule_verifie : true;
+    const matricule_vehicule = body.matricule_vehicule;
+    
+    if (!poids_brut_securite_sortie) {
+      return reply.code(400).send({ error: 'Poids brut requis' });
+    }
+    
+    const updateData: any = {
+      poids_brut_securite_sortie,
+      matricule_verifie_sortie: matricule_verifie,
+      date_sortie_securite: new Date(),
+      statut: 'EN_TOURNEE', // After pesée sortie, the vehicle is on its route
+    };
+    
+    if (securiteIdSortie) {
+      updateData.securiteIdSortie = securiteIdSortie;
+    }
+    
+    if (matricule_vehicule) {
+      updateData.matricule_vehicule = matricule_vehicule;
     }
     
     const tour = await prisma.tour.update({
       where: { id },
-      data: {
-        securiteIdSortie,
-        poids_brut_securite_sortie,
-        matricule_verifie_sortie: matricule_verifie,
-        date_sortie_securite: new Date(),
-        statut: 'EN_TOURNEE',
+      data: updateData,
+      include: {
+        driver: true,
+        secteur: true,
       },
     });
     
@@ -301,40 +407,101 @@ server.patch('/api/tours/:id/sortie', async (request, reply) => {
   }
 });
 
-// Pesée Entrée (Sécurité)
+// Pesée Entrée / Autoriser Départ (Sécurité) - Final weighing when driver leaves
 server.patch('/api/tours/:id/entree', async (request, reply) => {
   try {
     const { id } = request.params as any;
-    const {
-      securiteIdEntree,
-      poids_brut_securite_retour,
-      poids_tare_securite,
-      matricule_verifie,
-    } = request.body as any;
+    const body = request.body as any;
     
-    if (!securiteIdEntree || !poids_brut_securite_retour || !poids_tare_securite || matricule_verifie === undefined) {
-      return reply.code(400).send({ error: 'Données manquantes' });
+    // Support both formats: from web and mobile
+    const user = (request as any).user;
+    const securiteIdEntree = body.securiteIdEntree || user?.id;
+    const poids_brut_securite_retour = body.poids_brut_securite_retour || body.poids_brut_securite_entree;
+    const poids_tare_securite = body.poids_tare_securite;
+    const matricule_verifie = body.matricule_verifie !== undefined ? body.matricule_verifie : true;
+    const matricule_vehicule = body.matricule_vehicule;
+    
+    if (!poids_brut_securite_retour) {
+      return reply.code(400).send({ error: 'Poids brut requis' });
     }
     
-    const poids_net_total_calcule = poids_brut_securite_retour - poids_tare_securite;
+    // Vehicle returned from delivery - now goes to déchargement (unloading)
+    const updateData: any = {
+      poids_brut_securite_retour,
+      matricule_verifie_retour: matricule_verifie,
+      date_entree_securite: new Date(), // Entry time when vehicle returns
+      statut: 'EN_ATTENTE_DECHARGEMENT', // Move to unloading phase
+    };
+    
+    if (securiteIdEntree) {
+      updateData.securiteIdEntree = securiteIdEntree;
+    }
+    
+    if (poids_tare_securite) {
+      updateData.poids_tare_securite = poids_tare_securite;
+      updateData.poids_net_total_calcule = poids_brut_securite_retour - poids_tare_securite;
+    }
+    
+    if (matricule_vehicule) {
+      updateData.matricule_vehicule = matricule_vehicule;
+    }
     
     const tour = await prisma.tour.update({
       where: { id },
-      data: {
-        securiteIdEntree,
-        poids_brut_securite_retour,
-        poids_tare_securite,
-        poids_net_total_calcule,
-        matricule_verifie_retour: matricule_verifie,
-        date_entree_securite: new Date(),
-        statut: 'EN_ATTENTE_DECHARGEMENT',
-      },
+      data: updateData,
     });
     
     return tour;
   } catch (error) {
     server.log.error(error);
     return reply.code(500).send({ error: 'Erreur lors de la pesée entrée' });
+  }
+});
+
+// Signal vehicle arrival back at site (changes from EN_TOURNEE to EN_ATTENTE_DECHARGEMENT)
+server.patch('/api/tours/:id/arrivee', async (request, reply) => {
+  try {
+    const { id } = request.params as any;
+    
+    const tour = await prisma.tour.update({
+      where: { id },
+      data: {
+        statut: 'EN_ATTENTE_DECHARGEMENT',
+        date_arrivee: new Date(),
+      },
+      include: {
+        driver: true,
+        secteur: true,
+      },
+    });
+    
+    return tour;
+  } catch (error) {
+    server.log.error(error);
+    return reply.code(500).send({ error: 'Erreur lors du signalement d\'arrivée' });
+  }
+});
+
+// Log vehicle final exit (Sécurité authorizes vehicle to leave after TERMINEE)
+server.patch('/api/tours/:id/exit', async (request, reply) => {
+  try {
+    const { id } = request.params as any;
+    
+    const tour = await prisma.tour.update({
+      where: { id },
+      data: {
+        date_sortie_finale: new Date(),
+      },
+      include: {
+        driver: true,
+        secteur: true,
+      },
+    });
+    
+    return tour;
+  } catch (error) {
+    server.log.error(error);
+    return reply.code(500).send({ error: 'Erreur lors de l\'autorisation de sortie' });
   }
 });
 
@@ -345,11 +512,37 @@ server.patch('/api/tours/:id/retour', async (request, reply) => {
     const {
       nbre_caisses_retour,
       photo_preuve_retour_url,
+      photo_preuve_retour_base64,
       has_chicken_products,
     } = request.body as any;
     
-    if (nbre_caisses_retour === undefined || !photo_preuve_retour_url) {
-      return reply.code(400).send({ error: 'Données manquantes' });
+    if (nbre_caisses_retour === undefined) {
+      return reply.code(400).send({ error: 'Nombre de caisses requis' });
+    }
+    
+    // Handle photo - either from URL or base64
+    let finalPhotoUrl = photo_preuve_retour_url;
+    
+    if (photo_preuve_retour_base64 && !photo_preuve_retour_url) {
+      // Save base64 image to file
+      const fileName = `retour_${id}_${Date.now()}.jpg`;
+      const filePath = path.join(__dirname, '..', 'uploads', fileName);
+      
+      // Ensure uploads directory exists
+      const uploadsDir = path.join(__dirname, '..', 'uploads');
+      if (!fs.existsSync(uploadsDir)) {
+        fs.mkdirSync(uploadsDir, { recursive: true });
+      }
+      
+      // Write base64 to file
+      const imageBuffer = Buffer.from(photo_preuve_retour_base64, 'base64');
+      fs.writeFileSync(filePath, imageBuffer);
+      
+      finalPhotoUrl = `/uploads/${fileName}`;
+    }
+    
+    if (!finalPhotoUrl) {
+      return reply.code(400).send({ error: 'Photo de preuve requise' });
     }
     
     // Get tour to check for conflicts
@@ -377,7 +570,7 @@ server.patch('/api/tours/:id/retour', async (request, reply) => {
       where: { id },
       data: {
         nbre_caisses_retour,
-        photo_preuve_retour_url,
+        photo_preuve_retour_url: finalPhotoUrl,
         statut: newStatus as any,
       },
     });
@@ -391,7 +584,7 @@ server.patch('/api/tours/:id/retour', async (request, reply) => {
       const montant_dette = caisses_manquantes * valeur_tnd;
       
       // Check driver tolerance
-      const tolerance = tour.driver.tolerance_caisses_mensuelle || 0;
+      const tolerance = tour.driver?.tolerance_caisses_mensuelle || 0;
       const depasse_tolerance = caisses_manquantes > tolerance;
       
       conflict = await prisma.conflict.create({
@@ -404,7 +597,32 @@ server.patch('/api/tours/:id/retour', async (request, reply) => {
         },
       });
       
-      // TODO: Send notification to Direction
+      // Send notification to Direction about the conflict
+      try {
+        await notificationService.notifyNewConflict({
+          conflictId: conflict.id,
+          tourId: id,
+          driverName: tour.driver?.nom_complet || 'Chauffeur inconnu',
+          quantitePerdue: caisses_manquantes,
+          depasseTolerance: depasse_tolerance,
+          isSurplus: caisses_manquantes < 0, // negative means surplus
+        });
+      } catch (notifError) {
+        server.log.error('Failed to send conflict notification:', notifError);
+      }
+    }
+    
+    // Notify Agent Hygiène if chicken products returned
+    if (has_chicken_products === true) {
+      try {
+        await notificationService.notifyHygieneRequired(
+          id,
+          tour.driver?.nom_complet || 'Chauffeur inconnu',
+          tour.matricule_vehicule || ''
+        );
+      } catch (notifError) {
+        server.log.error('Failed to send hygiene notification:', notifError);
+      }
     }
     
     return {
@@ -618,6 +836,27 @@ server.get('/api/matricules/next-serie', async (request, reply) => {
 
 const start = async () => {
   try {
+    // Check for UploadThing token
+    if (!process.env.UPLOADTHING_TOKEN) {
+      console.warn('⚠️  UPLOADTHING_TOKEN not set - photo uploads may not work');
+    }
+    
+    // Register upload routes (legacy - for backward compatibility)
+    const uploadRoutes = await import('./routes/upload');
+    await server.register(uploadRoutes.default);
+    
+    // Register UploadThing routes
+    const uploadthingRoutes = await import('./routes/uploadthing');
+    await server.register(uploadthingRoutes.default);
+    
+    // Register dashboard routes
+    const dashboardRoutes = await import('./routes/dashboard');
+    await server.register(dashboardRoutes.default);
+    
+    // Register notification routes
+    const notificationRoutes = await import('./routes/notifications');
+    await server.register(notificationRoutes.default);
+    
     await server.listen({ port: 3001, host: '0.0.0.0' });
     console.log('Server running at http://localhost:3001');
   console.log('API Endpoints:');
@@ -637,6 +876,12 @@ const start = async () => {
   console.log('  - PATCH /api/conflicts/:id');
   console.log('  - GET  /drivers');
   console.log('  - GET  /config/ssids');
+  console.log('  - GET/POST /api/uploadthing (photo upload)');
+  console.log('  - GET  /api/dashboard/kpis');
+  console.log('  - GET  /api/dashboard/conflicts-urgent');
+  console.log('  - GET  /api/dashboard/tours-active');
+  console.log('  - GET  /api/finance/summary');
+  console.log('  - GET/POST /api/notifications');
   } catch (err) {
     server.log.error(err);
     process.exit(1);

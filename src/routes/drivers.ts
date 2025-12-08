@@ -9,7 +9,7 @@ export default async function driverRoutes(fastify: FastifyInstance) {
   }, async (request, reply) => {
     try {
       const result = await query(
-        'SELECT id, nom_complet, matricule_par_defaut, tolerance_caisses_mensuelle, statut FROM drivers ORDER BY nom_complet'
+        'SELECT id, nom_complet, matricule_par_defaut, poids_tare_vehicule, tolerance_caisses_mensuelle, statut FROM drivers ORDER BY nom_complet'
       );
       return reply.send({ drivers: result.rows });
     } catch (error) {
@@ -45,9 +45,10 @@ export default async function driverRoutes(fastify: FastifyInstance) {
   fastify.post('/drivers', {
     preHandler: [authenticate]
   }, async (request, reply) => {
-    const { nom_complet, matricule_par_defaut, tolerance_caisses_mensuelle } = request.body as {
+    const { nom_complet, matricule_par_defaut, poids_tare_vehicule, tolerance_caisses_mensuelle } = request.body as {
       nom_complet: string;
       matricule_par_defaut?: string;
+      poids_tare_vehicule?: number;
       tolerance_caisses_mensuelle?: number;
     };
 
@@ -57,8 +58,8 @@ export default async function driverRoutes(fastify: FastifyInstance) {
 
     try {
       const result = await query(
-        'INSERT INTO drivers (nom_complet, matricule_par_defaut, tolerance_caisses_mensuelle) VALUES ($1, $2, $3) RETURNING *',
-        [nom_complet, matricule_par_defaut || null, tolerance_caisses_mensuelle || 0]
+        'INSERT INTO drivers (nom_complet, matricule_par_defaut, poids_tare_vehicule, tolerance_caisses_mensuelle) VALUES ($1, $2, $3, $4) RETURNING *',
+        [nom_complet, matricule_par_defaut || null, poids_tare_vehicule || null, tolerance_caisses_mensuelle || 0]
       );
 
       return reply.code(201).send({ driver: result.rows[0] });
@@ -73,19 +74,20 @@ export default async function driverRoutes(fastify: FastifyInstance) {
     preHandler: [authenticate]
   }, async (request, reply) => {
     const { id } = request.params as { id: string };
-    const { nom_complet, matricule_par_defaut, tolerance_caisses_mensuelle, statut } = request.body as any;
+    const { nom_complet, matricule_par_defaut, poids_tare_vehicule, tolerance_caisses_mensuelle, statut } = request.body as any;
 
     try {
       const result = await query(
         `UPDATE drivers 
          SET nom_complet = COALESCE($1, nom_complet),
              matricule_par_defaut = COALESCE($2, matricule_par_defaut),
-             tolerance_caisses_mensuelle = COALESCE($3, tolerance_caisses_mensuelle),
-             statut = COALESCE($4, statut),
+             poids_tare_vehicule = COALESCE($3, poids_tare_vehicule),
+             tolerance_caisses_mensuelle = COALESCE($4, tolerance_caisses_mensuelle),
+             statut = COALESCE($5, statut),
              updated_at = CURRENT_TIMESTAMP
-         WHERE id = $5
+         WHERE id = $6
          RETURNING *`,
-        [nom_complet, matricule_par_defaut, tolerance_caisses_mensuelle, statut, id]
+        [nom_complet, matricule_par_defaut, poids_tare_vehicule, tolerance_caisses_mensuelle, statut, id]
       );
 
       if (result.rows.length === 0) {

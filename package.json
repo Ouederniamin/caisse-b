@@ -12,17 +12,25 @@
     "postinstall": "npx prisma generate",
     "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
     "prisma:generate": "prisma generate",
-    "prisma:push": "prisma db push"
+    "prisma:push": "prisma db push",
+    "prisma:seed": "ts-node prisma/seed.ts"
+  },
+  "prisma": {
+    "seed": "ts-node prisma/seed.ts"
   },
   "dependencies": {
     "@fastify/cors": "^8.4.1",
     "@fastify/jwt": "^7.2.2",
-    "@prisma/client": "^5.5.2",
+    "@fastify/static": "^7.0.4",
+    "@prisma/client": "^5.22.0",
     "bcrypt": "^5.1.1",
     "bcryptjs": "^2.4.3",
+    "better-auth": "^1.4.5",
     "dotenv": "^16.3.1",
+    "expo-linking": "^8.0.9",
     "fastify": "^4.24.3",
     "pg": "^8.11.3",
+    "uploadthing": "^7.7.4",
     "zod": "^3.22.4"
   },
   "devDependencies": {
@@ -31,6 +39,7 @@
     "@types/node": "^20.8.10",
     "@types/pg": "^8.10.9",
     "prisma": "^5.5.2",
+    "ts-node": "^10.9.2",
     "ts-node-dev": "^2.0.0",
     "typescript": "^5.2.2"
   }

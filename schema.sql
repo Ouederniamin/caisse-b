@@ -19,6 +19,8 @@ CREATE TABLE drivers (
     id SERIAL PRIMARY KEY,
     nom_complet VARCHAR(255) NOT NULL,
     matricule_par_defaut VARCHAR(50),
+    marque_vehicule VARCHAR(100),
+    poids_tare_vehicule DECIMAL(10, 2),
     tolerance_caisses_mensuelle INTEGER DEFAULT 0,
     statut VARCHAR(50) DEFAULT 'A_L_USINE',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
