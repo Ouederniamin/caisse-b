@@ -471,14 +471,10 @@ server.get('/api/dashboard/conflict/:id', async (request, reply) => {
 // Dashboard active tours endpoint
 server.get('/api/dashboard/tours-active', async (request, reply) => {
   try {
-    // Get today's tours that are still active
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
-
+    // Get all tours that are not TERMINEE (active tours)
     const activeTours = await prisma.tour.findMany({
       where: {
-        createdAt: { gte: todayStart },
-        statut: { in: ['PREPARATION', 'PRET_A_PARTIR', 'EN_TOURNEE', 'EN_ATTENTE_DECHARGEMENT', 'EN_ATTENTE_HYGIENE'] }
+        statut: { notIn: ['TERMINEE'] }
       },
       include: {
         driver: true,
@@ -497,8 +493,8 @@ server.get('/api/dashboard/tours-active', async (request, reply) => {
       statut: tour.statut,
       caisses_depart: tour.nbre_caisses_depart || 0,
       caisses_retour: tour.nbre_caisses_retour,
-      date_sortie: tour.date_sortie?.toISOString() || null,
-      date_entree: tour.date_entree?.toISOString() || null,
+      date_sortie: tour.date_sortie_securite?.toISOString() || null,
+      date_entree: tour.date_entree_securite?.toISOString() || null,
       createdAt: tour.createdAt.toISOString(),
     }));
 
