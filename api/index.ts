@@ -350,6 +350,124 @@ server.get('/api/dashboard/conflicts-urgent', async (request, reply) => {
   }
 });
 
+// Dashboard conflict detail with driver history
+server.get('/api/dashboard/conflict/:id', async (request, reply) => {
+  try {
+    const { id } = request.params as { id: string };
+
+    const conflict = await prisma.conflict.findUnique({
+      where: { id },
+      include: {
+        tour: {
+          include: {
+            driver: true,
+            secteur: true
+          }
+        }
+      }
+    });
+
+    if (!conflict) {
+      return reply.code(404).send({ error: 'Conflit non trouvé' });
+    }
+
+    // Get driver history if driver exists
+    let driverHistory = null;
+    if (conflict.tour?.driver_id) {
+      const driverConflicts = await prisma.conflict.findMany({
+        where: {
+          tour: { driver_id: conflict.tour.driver_id }
+        },
+        include: {
+          tour: {
+            include: { secteur: true }
+          }
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 20
+      });
+
+      const driverTours = await prisma.tour.count({
+        where: { driver_id: conflict.tour.driver_id }
+      });
+
+      const completedTours = await prisma.tour.count({
+        where: { 
+          driver_id: conflict.tour.driver_id,
+          statut: 'TERMINEE'
+        }
+      });
+
+      const totalConflicts = driverConflicts.length;
+      const resolvedConflicts = driverConflicts.filter(c => c.statut !== 'EN_ATTENTE').length;
+      const pendingConflicts = driverConflicts.filter(c => c.statut === 'EN_ATTENTE').length;
+      const totalCaissesLost = driverConflicts
+        .filter(c => c.quantite_perdue > 0)
+        .reduce((sum, c) => sum + c.quantite_perdue, 0);
+      const totalDebt = driverConflicts
+        .filter(c => c.quantite_perdue > 0)
+        .reduce((sum, c) => sum + c.montant_dette_tnd, 0);
+
+      driverHistory = {
+        driver: {
+          id: conflict.tour.driver?.id,
+          nom_complet: conflict.tour.driver?.nom || 'Non assigné',
+          matricule_par_defaut: conflict.tour.driver?.matricule_par_defaut || null,
+          tolerance_caisses_mensuelle: conflict.tour.driver?.tolerance_caisses_mensuelle || 0
+        },
+        stats: {
+          total_tours: driverTours,
+          completed_tours: completedTours,
+          total_conflicts: totalConflicts,
+          resolved_conflicts: resolvedConflicts,
+          pending_conflicts: pendingConflicts,
+          total_caisses_lost: totalCaissesLost,
+          total_debt_tnd: Math.round(totalDebt * 100) / 100
+        },
+        conflicts: driverConflicts.map(c => ({
+          id: c.id,
+          date: c.createdAt.toISOString(),
+          secteur: c.tour?.secteur?.nom || 'Inconnu',
+          quantite_perdue: c.quantite_perdue,
+          montant_dette_tnd: c.montant_dette_tnd,
+          statut: c.statut,
+          depasse_tolerance: c.depasse_tolerance,
+          is_current: c.id === id
+        }))
+      };
+    }
+
+    return {
+      conflict: {
+        id: conflict.id,
+        tourId: conflict.tour_id,
+        quantite_perdue: conflict.quantite_perdue,
+        montant_dette_tnd: conflict.montant_dette_tnd,
+        depasse_tolerance: conflict.depasse_tolerance,
+        is_surplus: conflict.is_surplus || false,
+        statut: conflict.statut,
+        notes_direction: conflict.notes_direction,
+        date_approbation_direction: conflict.date_approbation_direction?.toISOString() || null,
+        createdAt: conflict.createdAt.toISOString()
+      },
+      tour: {
+        id: conflict.tour?.id,
+        matricule: conflict.tour?.matricule_vehicule || '',
+        secteur: conflict.tour?.secteur?.nom || 'Inconnu',
+        nbre_caisses_depart: conflict.tour?.nbre_caisses_depart || 0,
+        nbre_caisses_retour: conflict.tour?.nbre_caisses_retour || null,
+        date_sortie: conflict.tour?.date_sortie_securite?.toISOString() || null,
+        date_entree: conflict.tour?.date_entree_securite?.toISOString() || null,
+        statut: conflict.tour?.statut || 'INCONNU'
+      },
+      driverHistory
+    };
+  } catch (error: any) {
+    console.error('Error loading conflict detail:', error.message);
+    return reply.code(500).send({ error: 'Erreur lors du chargement du conflit' });
+  }
+});
+
 // Dashboard active tours endpoint
 server.get('/api/dashboard/tours-active', async (request, reply) => {
   try {
