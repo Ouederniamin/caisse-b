@@ -329,10 +329,65 @@ server.get('/api/dashboard/conflicts-urgent', async (request, reply) => {
       take: 10
     });
 
-    return urgentConflicts;
+    // Format for mobile app
+    const formattedConflicts = urgentConflicts.map(conflict => ({
+      id: conflict.id,
+      tourId: conflict.tour_id,
+      driver: conflict.tour?.driver?.nom || 'Chauffeur inconnu',
+      secteur: conflict.tour?.secteur?.nom || 'Secteur inconnu',
+      matricule: conflict.tour?.matricule_vehicule || '',
+      quantite_perdue: conflict.quantite_perdue || 0,
+      montant_dette_tnd: conflict.montant_dette_tnd || 0,
+      depasse_tolerance: conflict.depasse_tolerance || false,
+      is_surplus: conflict.is_surplus || false,
+      createdAt: conflict.createdAt.toISOString(),
+    }));
+
+    return formattedConflicts;
   } catch (error: any) {
     console.error('Error loading urgent conflicts:', error.message);
     return reply.code(500).send({ error: 'Erreur lors du chargement des conflits urgents' });
+  }
+});
+
+// Dashboard active tours endpoint
+server.get('/api/dashboard/tours-active', async (request, reply) => {
+  try {
+    // Get today's tours that are still active
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+
+    const activeTours = await prisma.tour.findMany({
+      where: {
+        createdAt: { gte: todayStart },
+        statut: { in: ['EN_COURS', 'EN_ATTENTE_RETOUR', 'EN_ATTENTE_PESEE_SORTIE', 'EN_ATTENTE_PESEE_ENTREE'] }
+      },
+      include: {
+        driver: true,
+        secteur: true,
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 50
+    });
+
+    // Format for mobile app
+    const formattedTours = activeTours.map(tour => ({
+      id: tour.id,
+      driver: tour.driver?.nom || 'Chauffeur inconnu',
+      secteur: tour.secteur?.nom || 'Secteur inconnu',
+      matricule: tour.matricule_vehicule || '',
+      statut: tour.statut,
+      caisses_depart: tour.nbre_caisses_depart || 0,
+      caisses_retour: tour.nbre_caisses_retour,
+      date_sortie: tour.date_sortie?.toISOString() || null,
+      date_entree: tour.date_entree?.toISOString() || null,
+      createdAt: tour.createdAt.toISOString(),
+    }));
+
+    return formattedTours;
+  } catch (error: any) {
+    console.error('Error loading active tours:', error.message);
+    return reply.code(500).send({ error: 'Erreur lors du chargement des tours actifs' });
   }
 });
 
