@@ -55,18 +55,32 @@ server.get('/db-check', async (request, reply) => {
 // WiFi Security Status endpoint for mobile app
 server.get('/config/wifi-security-status', async (request, reply) => {
   try {
+    // First check environment variable (takes priority)
+    const envWifiSecurity = process.env.WIFI_SECURITY_ENABLED;
+    if (envWifiSecurity !== undefined) {
+      const enabled = envWifiSecurity.toLowerCase() === 'true';
+      return { 
+        enabled,
+        message: enabled ? 'WiFi security is enabled' : 'WiFi security is disabled',
+        source: 'environment'
+      };
+    }
+    
+    // Fallback to database config
     const config = await prisma.appConfig.findFirst({
       where: { key: 'wifi_security_enabled' }
     });
     
+    const enabled = config?.value === 'true';
     return { 
-      enabled: config?.value === 'true',
-      message: config?.value === 'true' ? 'WiFi security is enabled' : 'WiFi security is disabled'
+      enabled,
+      message: enabled ? 'WiFi security is enabled' : 'WiFi security is disabled',
+      source: 'database'
     };
   } catch (error) {
     server.log.error(error);
-    // If config not found, default to disabled for development
-    return { enabled: false, message: 'WiFi security is disabled (default)' };
+    // Default to disabled if any error
+    return { enabled: false, message: 'WiFi security is disabled (default)', source: 'default' };
   }
 });
 
