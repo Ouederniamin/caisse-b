@@ -365,6 +365,57 @@ server.post('/api/tours/create', async (request, reply) => {
   }
 });
 
+// Mark tour as ready to depart
+server.patch('/api/tours/:id/pret', async (request, reply) => {
+  try {
+    const { id } = request.params as any;
+    
+    const tour = await prisma.tour.update({
+      where: { id },
+      data: {
+        statut: 'PRET_A_PARTIR',
+      },
+      include: {
+        driver: true,
+        secteur: true,
+      }
+    });
+    
+    return tour;
+  } catch (error: any) {
+    console.error('Error marking tour ready:', error.message);
+    return reply.code(500).send({ error: 'Erreur lors de la mise à jour', details: error.message });
+  }
+});
+
+// Update tour status (generic)
+server.patch('/api/tours/:id/status', async (request, reply) => {
+  try {
+    const { id } = request.params as any;
+    const { status } = request.body as any;
+    
+    if (!status) {
+      return reply.code(400).send({ error: 'Status is required' });
+    }
+    
+    const tour = await prisma.tour.update({
+      where: { id },
+      data: {
+        statut: status,
+      },
+      include: {
+        driver: true,
+        secteur: true,
+      }
+    });
+    
+    return tour;
+  } catch (error: any) {
+    console.error('Error updating tour status:', error.message);
+    return reply.code(500).send({ error: 'Erreur lors de la mise à jour', details: error.message });
+  }
+});
+
 // Export for Vercel
 export default async function handler(req: any, res: any) {
   await server.ready();
