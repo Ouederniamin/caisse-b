@@ -414,6 +414,34 @@ server.patch('/api/tours/:id/sortie', async (request, reply) => {
       },
     });
     
+    // Record caisse movement (DEPART_TOURNEE)
+    try {
+      const stock = await prisma.stockCaisse.findFirst();
+      if (stock) {
+        const newSolde = stock.stock_actuel - tour.nbre_caisses_depart;
+        
+        // Create movement record
+        await prisma.mouvementCaisse.create({
+          data: {
+            type: 'DEPART_TOURNEE',
+            quantite: -tour.nbre_caisses_depart, // Negative because stock decreases
+            solde_apres: newSolde,
+            tourId: tour.id,
+            userId: securiteIdSortie,
+            notes: `Sortie tournée - ${tour.driver?.nom_complet || 'Chauffeur'} - ${tour.secteur?.nom || 'Secteur'} - Matricule: ${tour.matricule_vehicule}`,
+          },
+        });
+        
+        // Update stock
+        await prisma.stockCaisse.update({
+          where: { id: stock.id },
+          data: { stock_actuel: newSolde },
+        });
+      }
+    } catch (stockError) {
+      console.log('Stock not configured, skipping movement record');
+    }
+    
     return tour;
   } catch (error) {
     server.log.error(error);
@@ -588,6 +616,34 @@ server.patch('/api/tours/:id/retour', async (request, reply) => {
       },
     });
     
+    // Record caisse movements (RETOUR_TOURNEE and optionally PERTE_CONFIRMEE)
+    try {
+      const stock = await prisma.stockCaisse.findFirst();
+      if (stock) {
+        const sectorInfo = await prisma.secteur.findFirst({ where: { id: tour.secteurId || undefined } });
+        
+        // RETOUR_TOURNEE - caisses returned
+        const newSoldeRetour = stock.stock_actuel + nbre_caisses_retour;
+        await prisma.mouvementCaisse.create({
+          data: {
+            type: 'RETOUR_TOURNEE',
+            quantite: nbre_caisses_retour, // Positive because stock increases
+            solde_apres: newSoldeRetour,
+            tourId: tour.id,
+            notes: `Retour tournée - ${tour.driver?.nom_complet || 'Chauffeur'} - ${sectorInfo?.nom || 'Secteur'} - Matricule: ${tour.matricule_vehicule} - Retour: ${nbre_caisses_retour}/${tour.nbre_caisses_depart} caisses`,
+          },
+        });
+        
+        // Update stock to reflect returned caisses
+        await prisma.stockCaisse.update({
+          where: { id: stock.id },
+          data: { stock_actuel: newSoldeRetour },
+        });
+      }
+    } catch (stockError) {
+      console.log('Stock not configured, skipping movement record');
+    }
+    
     // Create conflict if caisses missing
     let conflict = null;
     if (has_conflict) {
@@ -609,6 +665,27 @@ server.patch('/api/tours/:id/retour', async (request, reply) => {
           statut: 'EN_ATTENTE',
         },
       });
+      
+      // Record PERTE movement for the missing caisses
+      try {
+        const stock = await prisma.stockCaisse.findFirst();
+        if (stock) {
+          // Note: Stock was already adjusted in RETOUR_TOURNEE (only returned caisses added)
+          // The loss is the difference which is tracked in the conflict
+          await prisma.mouvementCaisse.create({
+            data: {
+              type: 'PERTE_CONFIRMEE',
+              quantite: -caisses_manquantes, // Negative because it's a loss
+              solde_apres: stock.stock_actuel, // Stock already reflects the loss
+              tourId: id,
+              conflictId: conflict.id,
+              notes: `⚠️ PERTE: ${caisses_manquantes} caisses manquantes - ${tour.driver?.nom_complet || 'Chauffeur'} - Matricule: ${tour.matricule_vehicule} - Dette: ${montant_dette} TND`,
+            },
+          });
+        }
+      } catch (stockError) {
+        console.log('Stock not configured, skipping loss movement record');
+      }
       
       // Send notification to Direction about the conflict
       try {

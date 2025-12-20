@@ -609,5 +609,237 @@ export default async function dashboardRoutes(fastify: FastifyInstance) {
     }
   });
 
+  // GET /api/dashboard/mouvements - Get all caisse movements (Traçabilité)
+  fastify.get('/api/dashboard/mouvements', { preHandler: authenticate }, async (request: FastifyRequest, reply) => {
+    try {
+      const query = request.query as { 
+        page?: string; 
+        limit?: string; 
+        type?: string;
+        tourId?: string;
+        startDate?: string;
+        endDate?: string;
+      };
+      
+      const page = parseInt(query.page || '1');
+      const limit = parseInt(query.limit || '50');
+      const skip = (page - 1) * limit;
+      
+      // Build where clause
+      const where: any = {};
+      
+      if (query.type) {
+        where.type = query.type;
+      }
+      
+      if (query.tourId) {
+        where.tourId = query.tourId;
+      }
+      
+      if (query.startDate || query.endDate) {
+        where.createdAt = {};
+        if (query.startDate) {
+          where.createdAt.gte = new Date(query.startDate);
+        }
+        if (query.endDate) {
+          where.createdAt.lte = new Date(query.endDate);
+        }
+      }
+      
+      const [mouvements, total] = await Promise.all([
+        prisma.mouvementCaisse.findMany({
+          where,
+          include: {
+            tour: {
+              include: {
+                driver: true,
+                secteur: true,
+              },
+            },
+            conflict: true,
+            user: {
+              select: {
+                id: true,
+                name: true,
+                email: true,
+              },
+            },
+          },
+          orderBy: { createdAt: 'desc' },
+          skip,
+          take: limit,
+        }),
+        prisma.mouvementCaisse.count({ where }),
+      ]);
+      
+      return {
+        mouvements: mouvements.map(m => ({
+          id: m.id,
+          type: m.type,
+          quantite: m.quantite,
+          solde_apres: m.solde_apres,
+          notes: m.notes,
+          createdAt: m.createdAt,
+          tour: m.tour ? {
+            id: m.tour.id,
+            matricule: m.tour.matricule_vehicule,
+            driver: m.tour.driver?.nom_complet || 'Non assigné',
+            secteur: m.tour.secteur?.nom || 'Inconnu',
+            nbre_caisses_depart: m.tour.nbre_caisses_depart,
+            nbre_caisses_retour: m.tour.nbre_caisses_retour,
+            date_sortie: m.tour.date_sortie_securite,
+            date_entree: m.tour.date_entree_securite,
+          } : null,
+          conflict: m.conflict ? {
+            id: m.conflict.id,
+            quantite_perdue: m.conflict.quantite_perdue,
+            montant_dette_tnd: m.conflict.montant_dette_tnd,
+            statut: m.conflict.statut,
+          } : null,
+          user: m.user,
+        })),
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages: Math.ceil(total / limit),
+        },
+      };
+    } catch (error) {
+      fastify.log.error(error);
+      return reply.code(500).send({ error: 'Erreur serveur' });
+    }
+  });
+
+  // GET /api/dashboard/pertes - Get all losses (Caisse Bleeding)
+  fastify.get('/api/dashboard/pertes', { preHandler: authenticate }, async (request: FastifyRequest, reply) => {
+    try {
+      const query = request.query as { 
+        page?: string; 
+        limit?: string;
+        startDate?: string;
+        endDate?: string;
+        driverId?: string;
+        statut?: string;
+      };
+      
+      const page = parseInt(query.page || '1');
+      const limit = parseInt(query.limit || '50');
+      const skip = (page - 1) * limit;
+      
+      // Build where clause for movements that are losses
+      const whereMovements: any = {
+        type: { in: ['PERTE_CONFIRMEE'] },
+      };
+      
+      if (query.startDate || query.endDate) {
+        whereMovements.createdAt = {};
+        if (query.startDate) {
+          whereMovements.createdAt.gte = new Date(query.startDate);
+        }
+        if (query.endDate) {
+          whereMovements.createdAt.lte = new Date(query.endDate);
+        }
+      }
+      
+      // Get all loss movements with related data
+      const [pertes, total, stats] = await Promise.all([
+        prisma.mouvementCaisse.findMany({
+          where: whereMovements,
+          include: {
+            tour: {
+              include: {
+                driver: true,
+                secteur: true,
+              },
+            },
+            conflict: true,
+          },
+          orderBy: { createdAt: 'desc' },
+          skip,
+          take: limit,
+        }),
+        prisma.mouvementCaisse.count({ where: whereMovements }),
+        // Get aggregate stats
+        prisma.mouvementCaisse.aggregate({
+          where: whereMovements,
+          _sum: { quantite: true },
+          _count: { id: true },
+        }),
+      ]);
+      
+      // Get total monetary value from conflicts
+      const conflictIds = pertes
+        .filter(p => p.conflictId)
+        .map(p => p.conflictId as string);
+      
+      let totalDette = 0;
+      if (conflictIds.length > 0) {
+        const conflictSum = await prisma.conflict.aggregate({
+          where: { id: { in: conflictIds } },
+          _sum: { montant_dette_tnd: true },
+        });
+        totalDette = conflictSum._sum.montant_dette_tnd || 0;
+      }
+      
+      // Group by driver for summary
+      const driverSummary: Record<string, { nom: string; pertes: number; dette: number; count: number }> = {};
+      pertes.forEach(p => {
+        const driverName = p.tour?.driver?.nom_complet || 'Inconnu';
+        const driverId = p.tour?.driver?.id || 'unknown';
+        
+        if (!driverSummary[driverId]) {
+          driverSummary[driverId] = { nom: driverName, pertes: 0, dette: 0, count: 0 };
+        }
+        driverSummary[driverId].pertes += Math.abs(p.quantite);
+        driverSummary[driverId].dette += p.conflict?.montant_dette_tnd || 0;
+        driverSummary[driverId].count += 1;
+      });
+      
+      return {
+        pertes: pertes.map(p => ({
+          id: p.id,
+          quantite: Math.abs(p.quantite),
+          notes: p.notes,
+          createdAt: p.createdAt,
+          tour: p.tour ? {
+            id: p.tour.id,
+            matricule: p.tour.matricule_vehicule,
+            driver: p.tour.driver?.nom_complet || 'Non assigné',
+            driverId: p.tour.driver?.id,
+            secteur: p.tour.secteur?.nom || 'Inconnu',
+            nbre_caisses_depart: p.tour.nbre_caisses_depart,
+            nbre_caisses_retour: p.tour.nbre_caisses_retour,
+            date_sortie: p.tour.date_sortie_securite,
+          } : null,
+          conflict: p.conflict ? {
+            id: p.conflict.id,
+            quantite_perdue: p.conflict.quantite_perdue,
+            montant_dette_tnd: p.conflict.montant_dette_tnd,
+            statut: p.conflict.statut,
+          } : null,
+        })),
+        stats: {
+          totalPertes: Math.abs(stats._sum.quantite || 0),
+          totalDette: Math.round(totalDette * 100) / 100,
+          totalIncidents: stats._count.id,
+        },
+        driverSummary: Object.entries(driverSummary).map(([id, data]) => ({
+          id,
+          ...data,
+        })).sort((a, b) => b.pertes - a.pertes),
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages: Math.ceil(total / limit),
+        },
+      };
+    } catch (error) {
+      fastify.log.error(error);
+      return reply.code(500).send({ error: 'Erreur serveur' });
+    }
+  });
+
   console.log('  📊 Dashboard routes registered');
 }
