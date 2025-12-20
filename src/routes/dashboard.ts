@@ -94,6 +94,33 @@ export default async function dashboardRoutes(fastify: FastifyInstance) {
         statusMap[item.statut] = item._count.id;
       });
 
+      // Get stock data
+      let stockData = {
+        stock_actuel: 0,
+        stock_initial: 0,
+        stock_alerte: false,
+        stock_configure: false
+      };
+      
+      try {
+        const stock = await prisma.stockCaisse.findFirst({
+          orderBy: { updatedAt: 'desc' }
+        });
+        
+        if (stock && stock.initialise) {
+          const seuilAlerte = Math.floor(stock.stock_initial * (stock.seuil_alerte_pct / 100));
+          stockData = {
+            stock_actuel: stock.stock_actuel,
+            stock_initial: stock.stock_initial,
+            stock_alerte: stock.stock_actuel <= seuilAlerte,
+            stock_configure: true
+          };
+        }
+      } catch (stockError) {
+        // Stock table might not exist yet
+        console.log('Stock not configured yet');
+      }
+
       return {
         tours_actives: toursActives,
         caisses_dehors: caissesDehors,
@@ -104,6 +131,7 @@ export default async function dashboardRoutes(fastify: FastifyInstance) {
         tours_en_attente_hygiene: toursEnAttenteHygiene,
         tours_terminees_aujourdhui: toursTermineesAujourdhui,
         tours_par_statut: statusMap,
+        ...stockData,
         timestamp: new Date().toISOString()
       };
     } catch (error) {
