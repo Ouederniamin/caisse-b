@@ -18,8 +18,30 @@ enum TourStatus {
 
 enum ConflictStatus {
   EN_ATTENTE
-  PAYEE
-  ANNULE
+  PAYEE      // Legacy - kept for backwards compatibility
+  ANNULE     // Legacy - kept for backwards compatibility  
+  RESOLUE    // New status for fully resolved conflicts
+}
+
+enum MouvementType {
+  INITIALISATION
+  DEPART_TOURNEE
+  RETOUR_TOURNEE
+  SURPLUS
+  RETOUR_CONFLIT
+  PERTE_CONFIRMEE
+  AJUSTEMENT
+  ACHAT
+}
+
+enum ResolutionType {
+  RETOUR_CAISSES
+  PAIEMENT
+}
+
+enum ModePaiement {
+  ESPECES
+  RETENUE_SALAIRE
 }
 
 // --- Auth Models (BetterAuth) ---
@@ -50,6 +72,8 @@ model User {
   toursSecuriteEntree Tour[] @relation("SecuriteEntree")
   notifications Notification[]
   auditLogs     AuditLog[]
+  resolutionsEffectuees ResolutionConflict[]
+  mouvementsStock       MouvementCaisse[]
 
   @@map("user")
 }
@@ -189,6 +213,7 @@ model Tour {
 
   lignesRetour LigneRetourProduit[]
   conflicts    Conflict[]
+  mouvementsCaisse MouvementCaisse[]
 }
 
 model LigneRetourProduit {
@@ -212,8 +237,13 @@ model Conflict {
   tourId String
   tour   Tour   @relation(fields: [tourId], references: [id])
 
+  // Initial values (immutable after creation)
   quantite_perdue   Int
   montant_dette_tnd Float
+  
+  // Resolution tracking (updated progressively)
+  caisses_retournees Int   @default(0)
+  montant_paye       Float @default(0)
   
   statut ConflictStatus @default(EN_ATTENTE)
 
@@ -224,6 +254,60 @@ model Conflict {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  
+  resolutions ResolutionConflict[]
+  mouvements  MouvementCaisse[]
+}
+
+model ResolutionConflict {
+  id String @id @default(uuid())
+  
+  conflictId String
+  conflict   Conflict @relation(fields: [conflictId], references: [id])
+  
+  type         ResolutionType
+  quantite     Int?           // For RETOUR_CAISSES
+  montant      Float?         // For PAIEMENT
+  modePaiement ModePaiement?  // Only for PAIEMENT
+  
+  userId String
+  user   User   @relation(fields: [userId], references: [id])
+  notes  String?
+  
+  createdAt DateTime @default(now())
+  
+  @@map("resolution_conflict")
+}
+
+model StockCaisse {
+  id                String   @id @default("stock-principal")
+  stock_initial     Int      @default(0)
+  stock_actuel      Int      @default(0)
+  seuil_alerte_pct  Int      @default(10)
+  dernier_stock_ref Int      @default(0)
+  initialise        Boolean  @default(false)
+  updatedAt         DateTime @updatedAt
+  
+  @@map("stock_caisse")
+}
+
+model MouvementCaisse {
+  id          String        @id @default(uuid())
+  type        MouvementType
+  quantite    Int
+  solde_apres Int
+  
+  tourId     String?
+  tour       Tour?     @relation(fields: [tourId], references: [id])
+  conflictId String?
+  conflict   Conflict? @relation(fields: [conflictId], references: [id])
+  userId     String?
+  user       User?     @relation(fields: [userId], references: [id])
+  notes      String?
+  
+  createdAt DateTime @default(now())
+  
+  @@map("mouvement_caisse")
 }
 
 model AppConfig {
