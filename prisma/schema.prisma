@@ -8,12 +8,14 @@ datasource db {
 }
 
 enum TourStatus {
-  PREPARATION
-  PRET_A_PARTIR
-  EN_TOURNEE
-  EN_ATTENTE_DECHARGEMENT
-  EN_ATTENTE_HYGIENE
-  TERMINEE
+  PESEE_VIDE            // Truck weighed empty by security, waiting for loading
+  EN_CHARGEMENT         // Being loaded by Agent Contrôle
+  PRET_A_PARTIR         // Loaded, ready to leave
+  EN_TOURNEE            // On delivery route (after pesée sortie)
+  RETOUR                // Returned (marked by security, no weighing)
+  EN_ATTENTE_DECHARGEMENT // Waiting for Agent Contrôle to unload
+  EN_ATTENTE_HYGIENE    // Waiting for hygiene check
+  TERMINEE              // Complete
 }
 
 enum ConflictStatus {
@@ -165,11 +167,14 @@ model Tour {
   driverId String?
   driver   Driver? @relation(fields: [driverId], references: [id])
 
-  secteurId String
-  secteur   Secteur @relation(fields: [secteurId], references: [id])
+  secteurId String?
+  secteur   Secteur? @relation(fields: [secteurId], references: [id])
+  
+  // Multi-secteur support: store all selected secteur names as comma-separated string
+  secteurs_noms String?  // e.g. "Tunis Centre, Ariana, Ben Arous"
 
-  agentControleId String
-  agentControle   User   @relation("AgentControle", fields: [agentControleId], references: [id])
+  agentControleId String?
+  agentControle   User?   @relation("AgentControle", fields: [agentControleId], references: [id])
 
   agentHygieneId String?
   agentHygiene   User?   @relation("AgentHygiene", fields: [agentHygieneId], references: [id])
@@ -182,15 +187,25 @@ model Tour {
 
   matricule_vehicule String
 
-  nbre_caisses_depart Int
+  nbre_caisses_depart Int      @default(0)  // Set during chargement by Agent Contrôle
   nbre_caisses_retour Int?
 
-  poids_net_produits_depart Float
+  poids_net_produits_depart Float @default(0)  // Set during chargement
   
+  // Pesée à vide (empty truck weighing - when driver arrives)
+  poids_a_vide    Float?    // Empty truck weight
+  date_pesee_vide DateTime? // When empty weighing was done
+  
+  // Pesée sortie (loaded truck weighing - when driver leaves after chargement)
   poids_brut_securite_sortie Float?
+  
+  // Retour (just marking arrival, no weighing in new flow)
+  date_retour_securite DateTime? // When security marked arrival (no pesée)
+  
+  // Legacy fields kept for compatibility
   poids_brut_securite_retour Float?
-  poids_tare_securite Float?
-  poids_net_total_calcule Float? // Brut Retour - Tare
+  poids_tare_securite        Float?
+  poids_net_total_calcule    Float?
 
   photo_preuve_depart_url String?
   photo_preuve_retour_url String?
@@ -202,11 +217,11 @@ model Tour {
   matricule_verifie_sortie Boolean @default(false)
   matricule_verifie_retour Boolean @default(false)
 
-  date_sortie_securite DateTime?
-  date_entree_securite DateTime?
+  date_sortie_securite DateTime? // When driver left with loaded truck
+  date_entree_securite DateTime? // Legacy - use date_retour_securite instead
   date_sortie_finale   DateTime? // When vehicle exits after TERMINEE
 
-  statut TourStatus @default(PREPARATION)
+  statut TourStatus @default(PESEE_VIDE)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

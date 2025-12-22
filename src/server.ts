@@ -84,7 +84,98 @@ server.get('/config/wifi-security-status', async (request, reply) => {
   }
 });
 
-// Mobile Login endpoint - calls web BetterAuth for password verification
+// Get stock caisse info
+server.get('/api/stock', async (request, reply) => {
+  try {
+    const { page = '1', limit = '10' } = request.query as { page?: string; limit?: string };
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const skip = (pageNum - 1) * limitNum;
+    
+    const stock = await prisma.stockCaisse.findUnique({
+      where: { id: 'stock-principal' }
+    });
+    
+    if (!stock) {
+      return { initialise: false, stockActuel: 0, stockInitial: 0, stockEnTournee: 0 };
+    }
+    
+    // Calculate stock en tournee from active tours
+    const activeTours = await prisma.tour.findMany({
+      where: {
+        statut: { notIn: ['TERMINEE'] }
+      },
+      select: { nbre_caisses_depart: true, nbre_caisses_retour: true }
+    });
+    
+    const stockEnTournee = activeTours.reduce((sum, t) => {
+      const depart = t.nbre_caisses_depart || 0;
+      const retour = t.nbre_caisses_retour || 0;
+      return sum + (depart - retour);
+    }, 0);
+    
+    // Calculate stock perdu from confirmed losses in mouvements
+    const pertesResult = await prisma.mouvementCaisse.aggregate({
+      where: { type: 'PERTE_CONFIRMEE' },
+      _sum: { quantite: true }
+    });
+    const stockPerdu = Math.abs(pertesResult._sum.quantite || 0);
+    
+    // Calculate total sorties (departs - retours)
+    const departResult = await prisma.mouvementCaisse.aggregate({
+      where: { type: 'DEPART_TOURNEE' },
+      _sum: { quantite: true }
+    });
+    const retourResult = await prisma.mouvementCaisse.aggregate({
+      where: { type: 'RETOUR_TOURNEE' },
+      _sum: { quantite: true }
+    });
+    const totalDeparts = Math.abs(departResult._sum.quantite || 0);
+    const totalRetours = retourResult._sum.quantite || 0;
+    const sortiesTournees = totalDeparts - totalRetours - stockPerdu;
+    
+    // Get paginated mouvements
+    const totalMouvements = await prisma.mouvementCaisse.count();
+    const mouvements = await prisma.mouvementCaisse.findMany({
+      skip,
+      take: limitNum,
+      orderBy: { createdAt: 'desc' },
+      include: { tour: { select: { matricule_vehicule: true, driver: { select: { nom_complet: true } } } } }
+    });
+    
+    return {
+      initialise: stock.initialise,
+      stockActuel: stock.stock_actuel,
+      stockInitial: stock.stock_initial || 0,
+      stockEnTournee,
+      stockPerdu,
+      sortiesTournees: Math.max(0, sortiesTournees),
+      stockDisponible: stock.stock_actuel - stockEnTournee,
+      seuilAlerte: stock.seuil_alerte_pct || 20,
+      mouvements: mouvements.map(m => ({
+        id: m.id,
+        type: m.type,
+        quantite: m.quantite,
+        soldeApres: m.solde_apres,
+        notes: m.notes,
+        matricule: m.tour?.matricule_vehicule,
+        chauffeurNom: m.tour?.driver?.nom_complet,
+        createdAt: m.createdAt
+      })),
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total: totalMouvements,
+        totalPages: Math.ceil(totalMouvements / limitNum)
+      }
+    };
+  } catch (error) {
+    server.log.error(error);
+    return reply.code(500).send({ error: 'Erreur serveur' });
+  }
+});
+
+// Mobile Login endpoint - direct bcrypt verification (no dependency on web auth)
 server.post('/api/mobile/login', async (request, reply) => {
   try {
     const { email, password } = request.body as any;
@@ -95,34 +186,35 @@ server.post('/api/mobile/login', async (request, reply) => {
       return reply.code(400).send({ error: 'Email et mot de passe requis' });
     }
 
-    // Call the web app's BetterAuth endpoint to verify credentials
-    const webAuthUrl = process.env.WEB_AUTH_URL || 'http://localhost:3000';
-    
-    try {
-      const signInResponse = await fetch(`${webAuthUrl}/api/auth/sign-in/email`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password }),
-      });
-      
-      if (!signInResponse.ok) {
-        console.log('[Mobile Login] Web BetterAuth signIn failed:', signInResponse.status);
-        return reply.code(401).send({ error: 'Email ou mot de passe incorrect' });
-      }
-      
-      console.log('[Mobile Login] Web BetterAuth signIn success');
-    } catch (fetchError) {
-      console.error('[Mobile Login] Failed to reach web auth:', fetchError);
-      return reply.code(503).send({ error: 'Service d\'authentification non disponible' });
-    }
-
-    // Get user from database for JWT
+    // Get user from database
     const user = await prisma.user.findUnique({
-      where: { email }
+      where: { email },
+      include: {
+        accounts: {
+          where: { providerId: 'credential' }
+        }
+      }
     });
 
     if (!user) {
-      return reply.code(401).send({ error: 'Utilisateur non trouvé' });
+      console.log('[Mobile Login] User not found:', email);
+      return reply.code(401).send({ error: 'Email ou mot de passe incorrect' });
+    }
+
+    // Verify password using bcrypt
+    // Check account.password first (BetterAuth format), then user.password_hash as fallback
+    const bcrypt = await import('bcryptjs');
+    let passwordValid = false;
+    
+    if (user.accounts && user.accounts.length > 0 && user.accounts[0].password) {
+      passwordValid = await bcrypt.compare(password, user.accounts[0].password);
+    } else if (user.password_hash) {
+      passwordValid = await bcrypt.compare(password, user.password_hash);
+    }
+
+    if (!passwordValid) {
+      console.log('[Mobile Login] Invalid password for:', email);
+      return reply.code(401).send({ error: 'Email ou mot de passe incorrect' });
     }
 
     console.log('[Mobile Login] Success for:', email, 'role:', user.role);
@@ -269,8 +361,168 @@ server.get('/api/drivers/by-matricule', async (request, reply) => {
   }
 });
 
-// Create new tour (Agent Contrôle)
+// ==================== NEW FLOW ====================
+// 1. Security: Pesée à vide (empty weighing) - CREATES the tour
+// 2. Agent Contrôle: Chargement (loading caisses)
+// 3. Security: Pesée sortie (loaded weighing)
+// 4. Driver on tour: EN_TOURNEE
+// 5. Security: Mark arrival (NO weighing)
+// 6. Agent Contrôle: Déchargement (unloading, count caisses)
+// 7. Agent Hygiène: If chicken products
+// 8. TERMINEE
+
+// Step 1: Create tour with pesée à vide (Security)
+server.post('/api/tours/pesee-vide', async (request, reply) => {
+  try {
+    const {
+      matricule_vehicule,
+      poids_a_vide,
+      driverId,
+      driverName,
+      marque_vehicule,
+      securiteId,
+    } = request.body as any;
+    
+    // Get user from JWT if securiteId not provided
+    const user = (request as any).user;
+    const finalSecuriteId = securiteId || user?.id;
+    
+    // Validation
+    if (!matricule_vehicule || poids_a_vide === undefined) {
+      return reply.code(400).send({ error: 'Matricule et poids à vide sont requis' });
+    }
+    
+    // Handle driver - create new if not exists
+    let finalDriverId = driverId;
+    if (!driverId && driverName) {
+      // Create new driver
+      const newDriver = await prisma.driver.create({
+        data: {
+          nom_complet: driverName,
+          matricule_par_defaut: matricule_vehicule,
+          marque_vehicule: marque_vehicule || null,
+        },
+      });
+      finalDriverId = newDriver.id;
+    }
+    
+    const tour = await prisma.tour.create({
+      data: {
+        driverId: finalDriverId || null,
+        matricule_vehicule,
+        poids_a_vide: parseFloat(poids_a_vide),
+        date_pesee_vide: new Date(),
+        securiteIdSortie: finalSecuriteId, // Security who created the tour
+        statut: 'PESEE_VIDE',
+      },
+      include: {
+        driver: true,
+        securiteSortie: { select: { email: true, name: true, role: true } },
+      },
+    });
+    
+    return tour;
+  } catch (error) {
+    server.log.error(error);
+    return reply.code(500).send({ error: 'Erreur lors de la création de la tournée (pesée à vide)' });
+  }
+});
+
+// Step 2: Chargement (Agent Contrôle loads the truck)
+server.patch('/api/tours/:id/chargement', async (request, reply) => {
+  try {
+    const { id } = request.params as any;
+    const {
+      secteurId,
+      secteurNames, // Multi-secteur support: comma-separated names from mobile
+      agentControleId,
+      nbre_caisses_depart,
+      photo_preuve_depart_url,
+      photo_base64,
+    } = request.body as any;
+    
+    // Get user from JWT if agentControleId not provided
+    const user = (request as any).user;
+    const finalAgentId = agentControleId || user?.id;
+    
+    // Validation: at least one secteur (secteurId or secteurNames) and caisses count
+    if ((!secteurId && !secteurNames) || !nbre_caisses_depart) {
+      return reply.code(400).send({ error: 'Secteur et nombre de caisses sont requis' });
+    }
+    
+    // Handle photo upload
+    let photoUrl = photo_preuve_depart_url;
+    if (photo_base64) {
+      const filename = `tour_chargement_${Date.now()}_${Math.random().toString(36).substr(2, 9)}.jpg`;
+      const filePath = path.join(__dirname, '..', 'uploads', filename);
+      const base64Data = photo_base64.replace(/^data:image\/\w+;base64,/, '');
+      fs.writeFileSync(filePath, base64Data, 'base64');
+      photoUrl = `/uploads/${filename}`;
+    }
+    
+    const nbCaisses = parseInt(nbre_caisses_depart);
+    
+    // Use transaction to update tour AND stock atomically
+    const result = await prisma.$transaction(async (tx) => {
+      const tour = await tx.tour.update({
+        where: { id },
+        data: {
+          secteurId: secteurId || null,
+          secteurs_noms: secteurNames || null, // Store multi-secteur names
+          agentControleId: finalAgentId,
+          nbre_caisses_depart: nbCaisses,
+          photo_preuve_depart_url: photoUrl,
+          statut: 'PRET_A_PARTIR', // Ready to leave after loading
+        },
+        include: {
+          driver: true,
+          secteur: true,
+          agentControle: { select: { email: true, name: true, role: true } },
+        },
+      });
+      
+      // Update stock - caisses are leaving the warehouse
+      const stock = await tx.stockCaisse.findUnique({
+        where: { id: 'stock-principal' }
+      });
+      
+      if (stock && stock.initialise) {
+        const nouveauSolde = stock.stock_actuel - nbCaisses;
+        
+        await tx.stockCaisse.update({
+          where: { id: 'stock-principal' },
+          data: { stock_actuel: nouveauSolde }
+        });
+        
+        await tx.mouvementCaisse.create({
+          data: {
+            type: 'DEPART_TOURNEE',
+            quantite: -nbCaisses, // Negative because caisses are leaving
+            solde_apres: nouveauSolde,
+            tourId: id,
+            userId: finalAgentId,
+            notes: `Chargement: ${nbCaisses} caisses pour tournée`
+          }
+        });
+        
+        server.log.info(`Stock updated: -${nbCaisses} caisses, new balance: ${nouveauSolde}`);
+      }
+      
+      return tour;
+    });
+    
+    return result;
+  } catch (error) {
+    server.log.error(error);
+    return reply.code(500).send({ error: 'Erreur lors du chargement' });
+  }
+});
+
+// OLD: Create new tour (Agent Contrôle) - DEPRECATED, kept for backward compatibility
 server.post('/api/tours/create', async (request, reply) => {
+  // Redirect to the new flow if using old endpoint
+  console.log('[DEPRECATED] /api/tours/create called - use /api/tours/pesee-vide instead');
+  
   try {
     const {
       driverId,
@@ -293,7 +545,6 @@ server.post('/api/tours/create', async (request, reply) => {
     // Handle driver - create new if not exists
     let finalDriverId = driverId;
     if (!driverId && driverName) {
-      // Create new driver
       const newDriver = await prisma.driver.create({
         data: {
           nom_complet: driverName,
@@ -304,30 +555,13 @@ server.post('/api/tours/create', async (request, reply) => {
       finalDriverId = newDriver.id;
     }
     
-    // Handle photo upload - save base64 as data URL or file
+    // Handle photo upload
     let photoUrl = photo_preuve_depart_url;
     if (photo_base64) {
-      // Save base64 image to file system
-      const fs = require('fs');
-      const path = require('path');
-      const uploadsDir = path.join(__dirname, '..', 'uploads');
-      
-      // Create uploads directory if it doesn't exist
-      if (!fs.existsSync(uploadsDir)) {
-        fs.mkdirSync(uploadsDir, { recursive: true });
-      }
-      
-      // Generate unique filename
       const filename = `tour_depart_${Date.now()}_${Math.random().toString(36).substr(2, 9)}.jpg`;
-      const filePath = path.join(uploadsDir, filename);
-      
-      // Remove data URL prefix if present
+      const filePath = path.join(__dirname, '..', 'uploads', filename);
       const base64Data = photo_base64.replace(/^data:image\/\w+;base64,/, '');
-      
-      // Write file
       fs.writeFileSync(filePath, base64Data, 'base64');
-      
-      // Set URL for serving
       photoUrl = `/uploads/${filename}`;
     }
     
@@ -340,7 +574,7 @@ server.post('/api/tours/create', async (request, reply) => {
         nbre_caisses_depart: parseInt(nbre_caisses_depart),
         poids_net_produits_depart: poids_net_produits_depart || 0,
         photo_preuve_depart_url: photoUrl,
-        statut: 'PREPARATION',
+        statut: 'PRET_A_PARTIR',
       },
       include: {
         driver: true,
@@ -373,7 +607,7 @@ server.patch('/api/tours/:id/pret', async (request, reply) => {
   }
 });
 
-// Pesée Sortie (Sécurité)
+// Step 3: Pesée Sortie - Security weighs loaded truck (Sécurité)
 server.patch('/api/tours/:id/sortie', async (request, reply) => {
   try {
     const { id } = request.params as any;
@@ -390,8 +624,24 @@ server.patch('/api/tours/:id/sortie', async (request, reply) => {
       return reply.code(400).send({ error: 'Poids brut requis' });
     }
     
+    // Get the tour to access poids_a_vide for net weight calculation
+    const existingTour = await prisma.tour.findUnique({
+      where: { id },
+      include: { driver: true, secteur: true },
+    });
+    
+    if (!existingTour) {
+      return reply.code(404).send({ error: 'Tournée non trouvée' });
+    }
+    
+    // Calculate net weight of products
+    const poidsNetProduits = existingTour.poids_a_vide 
+      ? poids_brut_securite_sortie - existingTour.poids_a_vide 
+      : null;
+    
     const updateData: any = {
       poids_brut_securite_sortie,
+      poids_net_produits_depart: poidsNetProduits,
       matricule_verifie_sortie: matricule_verifie,
       date_sortie_securite: new Date(),
       statut: 'EN_TOURNEE', // After pesée sortie, the vehicle is on its route
@@ -414,10 +664,10 @@ server.patch('/api/tours/:id/sortie', async (request, reply) => {
       },
     });
     
-    // Record caisse movement (DEPART_TOURNEE)
+    // Record caisse movement (DEPART_TOURNEE) - caisses leaving for delivery
     try {
       const stock = await prisma.stockCaisse.findFirst();
-      if (stock) {
+      if (stock && tour.nbre_caisses_depart) {
         const newSolde = stock.stock_actuel - tour.nbre_caisses_depart;
         
         // Create movement record
@@ -449,7 +699,42 @@ server.patch('/api/tours/:id/sortie', async (request, reply) => {
   }
 });
 
-// Pesée Entrée / Autoriser Départ (Sécurité) - Final weighing when driver leaves
+// Step 5: Retour Sécurité - Security marks arrival (NO weighing)
+server.patch('/api/tours/:id/retour-securite', async (request, reply) => {
+  try {
+    const { id } = request.params as any;
+    const body = (request.body || {}) as any;
+    
+    const user = (request as any).user;
+    const securiteIdEntree = body?.securiteIdEntree || user?.id;
+    
+    const updateData: any = {
+      date_retour_securite: new Date(),
+      statut: 'RETOUR', // Arrived back, waiting for unloading
+    };
+    
+    if (securiteIdEntree) {
+      updateData.securiteIdEntree = securiteIdEntree;
+    }
+    
+    const tour = await prisma.tour.update({
+      where: { id },
+      data: updateData,
+      include: {
+        driver: true,
+        secteur: true,
+      },
+    });
+    
+    return tour;
+  } catch (error) {
+    server.log.error(error);
+    return reply.code(500).send({ error: 'Erreur lors du marquage d\'arrivée' });
+  }
+});
+
+// OLD: Pesée Entrée / Autoriser Départ (Sécurité) - DEPRECATED in new flow
+// In new flow, we use /retour-securite instead (no weighing on return)
 server.patch('/api/tours/:id/entree', async (request, reply) => {
   try {
     const { id } = request.params as any;
@@ -594,6 +879,13 @@ server.patch('/api/tours/:id/retour', async (request, reply) => {
     
     if (!tour) {
       return reply.code(404).send({ error: 'Tournée non trouvée' });
+    }
+    
+    // Validate that tour is in RETOUR status (driver has returned)
+    if (tour.statut !== 'RETOUR') {
+      return reply.code(400).send({ 
+        error: `Impossible de décharger: le véhicule doit être en statut RETOUR (actuel: ${tour.statut})` 
+      });
     }
     
     const caisses_manquantes = tour.nbre_caisses_depart - nbre_caisses_retour;

@@ -1,4 +1,6 @@
 // BetterAuth requires ESM, using dynamic import
+import bcrypt from 'bcryptjs';
+
 let auth: any;
 
 export async function initAuth() {
@@ -12,6 +14,15 @@ export async function initAuth() {
     }),
     emailAndPassword: {
       enabled: true,
+      // Use bcrypt for password hashing (compatible with seed data)
+      password: {
+        hash: async (password: string) => {
+          return await bcrypt.hash(password, 10);
+        },
+        verify: async ({ hash, password }: { hash: string; password: string }) => {
+          return await bcrypt.compare(password, hash);
+        },
+      },
     },
     trustedOrigins: [
       "http://localhost:3000",  // Web app
