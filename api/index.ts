@@ -378,10 +378,12 @@ server.get('/api/dashboard/kpis', async (request, reply) => {
       totalToursToday,
       toursEnCours,
       toursTermines,
-      toursEnAttente,
+      toursEnAttenteRetour,
+      toursEnAttenteHygiene,
       totalDrivers,
       totalConflicts,
-      conflitsEnAttente
+      conflitsEnAttente,
+      stockData
     ] = await Promise.all([
       // Total tours created today
       prisma.tour.count({
@@ -392,8 +394,7 @@ server.get('/api/dashboard/kpis', async (request, reply) => {
       // Tours currently in progress (EN_TOURNEE)
       prisma.tour.count({
         where: {
-          statut: 'EN_TOURNEE',
-          createdAt: { gte: today, lt: tomorrow }
+          statut: 'EN_TOURNEE'
         }
       }),
       // Completed tours today
@@ -403,11 +404,16 @@ server.get('/api/dashboard/kpis', async (request, reply) => {
           createdAt: { gte: today, lt: tomorrow }
         }
       }),
-      // Tours waiting (PREPARATION, PRET_A_PARTIR, EN_ATTENTE_*)
+      // Tours waiting for return (EN_ATTENTE_DECHARGEMENT or similar)
       prisma.tour.count({
         where: {
-          statut: { in: ['PREPARATION', 'PRET_A_PARTIR', 'EN_ATTENTE_DECHARGEMENT', 'EN_ATTENTE_HYGIENE'] },
-          createdAt: { gte: today, lt: tomorrow }
+          statut: { in: ['EN_ATTENTE_DECHARGEMENT', 'EN_ATTENTE_PESEE_VIDE'] }
+        }
+      }),
+      // Tours waiting for hygiene
+      prisma.tour.count({
+        where: {
+          statut: 'EN_ATTENTE_HYGIENE'
         }
       }),
       // Total active drivers
@@ -417,34 +423,73 @@ server.get('/api/dashboard/kpis', async (request, reply) => {
       // Pending conflicts
       prisma.conflict.count({
         where: { statut: 'EN_ATTENTE' }
-      })
+      }),
+      // Get stock data
+      prisma.stockCaisse.findFirst()
     ]);
 
-    // Calculate total crates today
-    const caissesToday = await prisma.tour.aggregate({
+    // Calculate caisses currently out (from active tours)
+    const caissesEnCours = await prisma.tour.aggregate({
       where: {
-        createdAt: { gte: today, lt: tomorrow }
+        statut: { in: ['EN_TOURNEE', 'EN_ATTENTE_DECHARGEMENT', 'EN_ATTENTE_PESEE_VIDE', 'EN_ATTENTE_HYGIENE'] }
       },
       _sum: {
-        nbre_caisses_depart: true,
-        nbre_caisses_retour: true
+        nbre_caisses_depart: true
       }
     });
 
+    // Calculate kilos delivered today
+    const kilosAujourdHui = await prisma.tour.aggregate({
+      where: {
+        createdAt: { gte: today, lt: tomorrow },
+        statut: 'TERMINEE'
+      },
+      _sum: {
+        poids_plein: true,
+        poids_vide: true
+      }
+    });
+
+    const kilosLivres = (kilosAujourdHui._sum.poids_plein || 0) - (kilosAujourdHui._sum.poids_vide || 0);
+
+    // Tours by status for charts
+    const toursByStatus = await prisma.tour.groupBy({
+      by: ['statut'],
+      _count: { id: true }
+    });
+
+    const toursParStatut: Record<string, number> = {};
+    toursByStatus.forEach(t => {
+      toursParStatut[t.statut] = t._count.id;
+    });
+
     return {
+      // Fields expected by mobile
+      tours_actives: toursEnCours,
+      caisses_dehors: caissesEnCours._sum.nbre_caisses_depart || 0,
+      conflits_ouverts: conflitsEnAttente,
+      conflits_hors_tolerance: conflitsEnAttente, // For now, same as open conflicts
+      kilos_livres: kilosLivres,
+      tours_en_attente_retour: toursEnAttenteRetour,
+      tours_en_attente_hygiene: toursEnAttenteHygiene,
+      tours_terminees_aujourdhui: toursTermines,
+      tours_par_statut: toursParStatut,
+      // Stock data
+      stock_actuel: stockData?.stock_actuel || 0,
+      stock_initial: 10000, // Default initial stock
+      stock_alerte: (stockData?.stock_actuel || 0) < 1000,
+      stock_configure: !!stockData,
+      // Legacy fields for backwards compatibility
       toursAujourdHui: totalToursToday,
       toursEnCours,
       toursTermines,
-      toursEnAttente,
       totalChauffeurs: totalDrivers,
-      caissesDepart: caissesToday._sum.nbre_caisses_depart || 0,
-      caissesRetour: caissesToday._sum.nbre_caisses_retour || 0,
       conflitsTotal: totalConflicts,
       conflitsEnAttente,
       timestamp: new Date().toISOString()
     };
-  } catch (error) {
-    server.log.error(error);
+  } catch (error: any) {
+    console.error('Error fetching KPIs:', error.message);
     return reply.code(500).send({ error: 'Erreur lors du chargement des KPIs' });
   }
 });
