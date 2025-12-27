@@ -1166,6 +1166,34 @@ server.patch('/api/tours/:id/retour', async (request, reply) => {
           statut: 'EN_ATTENTE',
         }
       });
+      
+      // Create PERTE_CONFIRMEE mouvement for stock tracking
+      // Get current stock
+      let stockCaisse = await prisma.stockCaisse.findFirst();
+      if (!stockCaisse) {
+        stockCaisse = await prisma.stockCaisse.create({
+          data: { stock_actuel: 0 }
+        });
+      }
+      
+      const newStock = stockCaisse.stock_actuel - difference;
+      
+      // Update stock
+      await prisma.stockCaisse.update({
+        where: { id: stockCaisse.id },
+        data: { stock_actuel: newStock }
+      });
+      
+      // Create mouvement record for the loss
+      await prisma.mouvementCaisse.create({
+        data: {
+          type: 'PERTE_CONFIRMEE',
+          quantite: -difference,
+          solde_apres: newStock,
+          tourId: id,
+          notes: `PERTE: ${difference} caisses manquantes - Tournée ${existingTour.driver?.nom_complet || 'N/A'}`,
+        }
+      });
     }
     
     const tour = await prisma.tour.update({
