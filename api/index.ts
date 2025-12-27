@@ -1414,6 +1414,107 @@ server.post('/api/conflicts/:id/approve', async (request, reply) => {
   }
 });
 
+// Resolve conflict with resolution details (Direction)
+server.post('/api/conflicts/:id/resolve', async (request, reply) => {
+  try {
+    const { id } = request.params as any;
+    const { type, modePaiement, quantite, montant, notes } = request.body as {
+      type: 'PAIEMENT' | 'RETOUR_CAISSES';
+      modePaiement?: 'ESPECES' | 'RETENUE_SALAIRE';
+      quantite?: number;
+      montant?: number;
+      notes?: string;
+    };
+    
+    // Get the conflict first
+    const existingConflict = await prisma.conflict.findUnique({
+      where: { id },
+      include: { tour: { include: { driver: true } } }
+    });
+    
+    if (!existingConflict) {
+      return reply.code(404).send({ error: 'Conflit non trouvé' });
+    }
+    
+    // Create resolution record
+    // Note: We need a userId - for now we'll skip it or use a system user
+    // In production, get it from auth token
+    
+    // Update conflict based on resolution type
+    let updateData: any = {
+      notes_direction: notes || '',
+      date_approbation_direction: new Date(),
+    };
+    
+    if (type === 'PAIEMENT') {
+      // Full payment - mark as PAYEE
+      updateData.statut = 'PAYEE';
+      updateData.montant_paye = montant || existingConflict.montant_dette_tnd;
+    } else if (type === 'RETOUR_CAISSES') {
+      const qteRetour = quantite || 0;
+      updateData.caisses_retournees = (existingConflict.caisses_retournees || 0) + qteRetour;
+      
+      // Check if fully resolved
+      if (updateData.caisses_retournees >= existingConflict.quantite_perdue) {
+        updateData.statut = 'RESOLUE';
+      } else {
+        // Partial return - keep EN_ATTENTE or mark as partially resolved
+        updateData.statut = 'EN_ATTENTE'; // Or could use a PARTIEL status
+      }
+      
+      // If crates were returned, adjust stock
+      if (qteRetour > 0) {
+        let stockCaisse = await prisma.stockCaisse.findFirst();
+        if (stockCaisse) {
+          const newStock = stockCaisse.stock_actuel + qteRetour;
+          await prisma.stockCaisse.update({
+            where: { id: stockCaisse.id },
+            data: { stock_actuel: newStock }
+          });
+          
+          // Create RETOUR mouvement (positive - crates returned to stock)
+          await prisma.mouvementCaisse.create({
+            data: {
+              type: 'RETOUR_TOURNEE',
+              quantite: qteRetour,
+              solde_apres: newStock,
+              tourId: existingConflict.tourId,
+              conflictId: id,
+              notes: `RECUPERATION: ${qteRetour} caisses récupérées - ${existingConflict.tour?.driver?.nom_complet || 'N/A'}`,
+            }
+          });
+        }
+      }
+    }
+    
+    const conflict = await prisma.conflict.update({
+      where: { id },
+      data: updateData,
+      include: {
+        tour: {
+          include: {
+            driver: true,
+          }
+        }
+      }
+    });
+    
+    return {
+      success: true,
+      conflict,
+      resolution: {
+        type,
+        modePaiement,
+        quantite,
+        montant
+      }
+    };
+  } catch (error: any) {
+    console.error('Error resolving conflict:', error.message);
+    return reply.code(500).send({ error: 'Erreur lors de la résolution du conflit', details: error.message });
+  }
+});
+
 // Backfill existing conflicts - create PERTE_CONFIRMEE mouvements for conflicts without one
 server.post('/api/admin/backfill-conflicts', async (request, reply) => {
   try {
