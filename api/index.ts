@@ -1167,6 +1167,9 @@ server.patch('/api/tours/:id/retour', async (request, reply) => {
       photo_preuve_retour_url 
     } = request.body as any;
     
+    console.log('[RETOUR] Processing retour for tour:', id);
+    console.log('[RETOUR] nbre_caisses_retour:', nbre_caisses_retour);
+    
     // Upload photo if base64 provided
     let photoUrl = photo_preuve_retour_url || null;
     if (photo_preuve_retour_base64) {
@@ -1178,8 +1181,9 @@ server.patch('/api/tours/:id/retour', async (request, reply) => {
         
         const uploadResult = await utapi.uploadFiles([file]);
         photoUrl = uploadResult[0]?.data?.ufsUrl || uploadResult[0]?.data?.url || null;
+        console.log('[RETOUR] Photo uploaded:', photoUrl);
       } catch (uploadError: any) {
-        console.warn('Photo upload failed:', uploadError.message);
+        console.warn('[RETOUR] Photo upload failed:', uploadError.message);
       }
     }
     
@@ -1193,26 +1197,46 @@ server.patch('/api/tours/:id/retour', async (request, reply) => {
     });
     
     if (!existingTour) {
+      console.error('[RETOUR] Tour not found:', id);
       return reply.code(404).send({ error: 'Tournée non trouvée' });
     }
     
-    const difference = existingTour.nbre_caisses_depart - parseInt(nbre_caisses_retour);
+    const caissesRetour = parseInt(nbre_caisses_retour);
+    const caissesDepart = existingTour.nbre_caisses_depart || 0;
+    const difference = caissesDepart - caissesRetour; // Positive = manquants, Negative = surplus
     const tolerance = existingTour.driver?.tolerance_caisses_mensuelle || 0;
     
-    // Create conflict if crate difference exceeds tolerance
-    if (difference > tolerance) {
-      await prisma.conflict.create({
+    console.log('[RETOUR] Calculating conflict:', { caissesDepart, caissesRetour, difference, tolerance });
+    
+    // Create conflict if:
+    // 1. Crates missing and exceeds tolerance (difference > tolerance)
+    // 2. Surplus crates (difference < 0) - always a conflict
+    const shouldCreateConflict = difference > tolerance || difference < 0;
+    
+    if (shouldCreateConflict) {
+      const isSurplus = difference < 0;
+      const quantitePerdue = isSurplus ? 0 : difference;
+      const quantiteSurplus = isSurplus ? Math.abs(difference) : 0;
+      
+      console.log('[RETOUR] Creating conflict:', { isSurplus, quantitePerdue, quantiteSurplus });
+      
+      // Create conflict record
+      const conflict = await prisma.conflict.create({
         data: {
           tourId: id,
-          quantite_perdue: difference,
-          montant_dette_tnd: difference * 50, // Example: 50 TND per crate
-          depasse_tolerance: true,
+          quantite_perdue: isSurplus ? quantiteSurplus : quantitePerdue, // Store the absolute difference
+          montant_dette_tnd: quantitePerdue * 50, // Only charge for losses, not surplus
+          depasse_tolerance: !isSurplus && difference > tolerance,
           statut: 'EN_ATTENTE',
+          notes_direction: isSurplus ? `SURPLUS: ${quantiteSurplus} caisses en trop` : null,
         }
       });
       
-      // Create PERTE_CONFIRMEE mouvement for stock tracking
-      // Get current stock
+      console.log('[RETOUR] Conflict created:', conflict.id);
+      
+      // Update stock and create mouvement
+      // For losses: subtract from stock
+      // For surplus: we might want to add (but this is unusual - investigate why)
       let stockCaisse = await prisma.stockCaisse.findFirst();
       if (!stockCaisse) {
         stockCaisse = await prisma.stockCaisse.create({
@@ -1220,30 +1244,59 @@ server.patch('/api/tours/:id/retour', async (request, reply) => {
         });
       }
       
-      const newStock = stockCaisse.stock_actuel - difference;
-      
-      // Update stock
-      await prisma.stockCaisse.update({
-        where: { id: stockCaisse.id },
-        data: { stock_actuel: newStock }
-      });
-      
-      // Create mouvement record for the loss
-      await prisma.mouvementCaisse.create({
-        data: {
-          type: 'PERTE_CONFIRMEE',
-          quantite: -difference,
-          solde_apres: newStock,
-          tourId: id,
-          notes: `PERTE: ${difference} caisses manquantes - Tournée ${existingTour.driver?.nom_complet || 'N/A'}`,
-        }
-      });
+      if (!isSurplus && quantitePerdue > 0) {
+        // Lost crates - subtract from stock
+        const newStock = stockCaisse.stock_actuel - quantitePerdue;
+        
+        await prisma.stockCaisse.update({
+          where: { id: stockCaisse.id },
+          data: { stock_actuel: newStock }
+        });
+        
+        // Create mouvement record for the loss with conflict link
+        await prisma.mouvementCaisse.create({
+          data: {
+            type: 'PERTE_CONFIRMEE',
+            quantite: -quantitePerdue,
+            solde_apres: newStock,
+            tourId: id,
+            conflictId: conflict.id,
+            notes: `PERTE: ${quantitePerdue} caisses manquantes - Tournée ${existingTour.driver?.nom_complet || 'N/A'}`,
+          }
+        });
+        
+        console.log('[RETOUR] Stock updated (loss) and mouvement created');
+      } else if (isSurplus && quantiteSurplus > 0) {
+        // Surplus crates - add to stock (unusual but possible)
+        const newStock = stockCaisse.stock_actuel + quantiteSurplus;
+        
+        await prisma.stockCaisse.update({
+          where: { id: stockCaisse.id },
+          data: { stock_actuel: newStock }
+        });
+        
+        // Create mouvement record for the surplus
+        await prisma.mouvementCaisse.create({
+          data: {
+            type: 'AJUSTEMENT',
+            quantite: quantiteSurplus,
+            solde_apres: newStock,
+            tourId: id,
+            conflictId: conflict.id,
+            notes: `SURPLUS: ${quantiteSurplus} caisses en trop - Tournée ${existingTour.driver?.nom_complet || 'N/A'}`,
+          }
+        });
+        
+        console.log('[RETOUR] Stock updated (surplus) and mouvement created');
+      }
+    } else {
+      console.log('[RETOUR] No conflict needed (within tolerance or exact match)');
     }
     
     const tour = await prisma.tour.update({
       where: { id },
       data: {
-        nbre_caisses_retour: parseInt(nbre_caisses_retour),
+        nbre_caisses_retour: caissesRetour,
         photo_preuve_retour_url: photoUrl,
         statut: nextStatus,
       },
@@ -1254,9 +1307,11 @@ server.patch('/api/tours/:id/retour', async (request, reply) => {
       }
     });
     
+    console.log('[RETOUR] Tour updated successfully:', tour.id, 'Status:', nextStatus);
+    
     return tour;
   } catch (error: any) {
-    console.error('Error processing retour:', error.message);
+    console.error('[RETOUR] Error processing retour:', error.message, error.stack);
     return reply.code(500).send({ error: 'Erreur lors de l\'enregistrement du retour', details: error.message });
   }
 });
