@@ -404,10 +404,10 @@ server.get('/api/dashboard/kpis', async (request, reply) => {
           createdAt: { gte: today, lt: tomorrow }
         }
       }),
-      // Tours waiting for return (EN_ATTENTE_DECHARGEMENT or similar)
+      // Tours waiting for return (EN_ATTENTE_DECHARGEMENT or RETOUR)
       prisma.tour.count({
         where: {
-          statut: { in: ['EN_ATTENTE_DECHARGEMENT', 'EN_ATTENTE_PESEE_VIDE'] }
+          statut: { in: ['EN_ATTENTE_DECHARGEMENT', 'RETOUR'] }
         }
       }),
       // Tours waiting for hygiene
@@ -431,7 +431,7 @@ server.get('/api/dashboard/kpis', async (request, reply) => {
     // Calculate caisses currently out (from active tours)
     const caissesEnCours = await prisma.tour.aggregate({
       where: {
-        statut: { in: ['EN_TOURNEE', 'EN_ATTENTE_DECHARGEMENT', 'EN_ATTENTE_PESEE_VIDE', 'EN_ATTENTE_HYGIENE'] }
+        statut: { in: ['EN_TOURNEE', 'EN_ATTENTE_DECHARGEMENT', 'RETOUR', 'EN_ATTENTE_HYGIENE'] }
       },
       _sum: {
         nbre_caisses_depart: true
@@ -445,12 +445,11 @@ server.get('/api/dashboard/kpis', async (request, reply) => {
         statut: 'TERMINEE'
       },
       _sum: {
-        poids_plein: true,
-        poids_vide: true
+        poids_net_produits_depart: true
       }
     });
 
-    const kilosLivres = (kilosAujourdHui._sum.poids_plein || 0) - (kilosAujourdHui._sum.poids_vide || 0);
+    const kilosLivres = kilosAujourdHui._sum?.poids_net_produits_depart || 0;
 
     // Tours by status for charts
     const toursByStatus = await prisma.tour.groupBy({
@@ -466,7 +465,7 @@ server.get('/api/dashboard/kpis', async (request, reply) => {
     return {
       // Fields expected by mobile
       tours_actives: toursEnCours,
-      caisses_dehors: caissesEnCours._sum.nbre_caisses_depart || 0,
+      caisses_dehors: caissesEnCours._sum?.nbre_caisses_depart || 0,
       conflits_ouverts: conflitsEnAttente,
       conflits_hors_tolerance: conflitsEnAttente, // For now, same as open conflicts
       kilos_livres: kilosLivres,
@@ -517,14 +516,14 @@ server.get('/api/dashboard/conflicts-urgent', async (request, reply) => {
     // Format for mobile app
     const formattedConflicts = urgentConflicts.map(conflict => ({
       id: conflict.id,
-      tourId: conflict.tour_id,
+      tourId: conflict.tourId,
       driver: conflict.tour?.driver?.nom_complet || 'Chauffeur inconnu',
       secteur: conflict.tour?.secteur?.nom || 'Secteur inconnu',
       matricule: conflict.tour?.matricule_vehicule || '',
       quantite_perdue: conflict.quantite_perdue || 0,
       montant_dette_tnd: conflict.montant_dette_tnd || 0,
       depasse_tolerance: conflict.depasse_tolerance || false,
-      is_surplus: conflict.is_surplus || false,
+      is_surplus: false,
       createdAt: conflict.createdAt.toISOString(),
     }));
 
@@ -625,11 +624,11 @@ server.get('/api/dashboard/conflict/:id', async (request, reply) => {
     return {
       conflict: {
         id: conflict.id,
-        tourId: conflict.tour_id,
+        tourId: conflict.tourId,
         quantite_perdue: conflict.quantite_perdue,
         montant_dette_tnd: conflict.montant_dette_tnd,
         depasse_tolerance: conflict.depasse_tolerance,
-        is_surplus: conflict.is_surplus || false,
+        is_surplus: false,
         statut: conflict.statut,
         notes_direction: conflict.notes_direction,
         date_approbation_direction: conflict.date_approbation_direction?.toISOString() || null,
@@ -697,7 +696,7 @@ server.get('/api/matricules/next-serie', async (request, reply) => {
     const latestTour = await prisma.tour.findFirst({
       where: {
         matricule_vehicule: {
-          not: null
+          not: ''
         }
       },
       orderBy: {
@@ -720,8 +719,8 @@ server.get('/api/matricules/next-serie', async (request, reply) => {
     }
 
     return { next_serie: nextSerie };
-  } catch (error) {
-    server.log.error('Error in next-serie:', error);
+  } catch (error: any) {
+    console.error('Error in next-serie:', error?.message);
     // Return default serie on error
     return { next_serie: '253' };
   }
@@ -1009,7 +1008,7 @@ server.post('/api/tours/create', async (request, reply) => {
         nbre_caisses_depart: parseInt(nbre_caisses_depart),
         poids_net_produits_depart: parseFloat(poids_net_produits_depart) || 0,
         photo_preuve_depart_url: photoUrl,
-        statut: 'PREPARATION',
+        statut: 'EN_CHARGEMENT',
         agentControleId,
         driverId: finalDriverId,
       },
