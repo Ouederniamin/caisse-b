@@ -351,6 +351,19 @@ server.get('/api/secteurs', async (request, reply) => {
   }
 });
 
+// Get produits
+server.get('/api/produits', async (request, reply) => {
+  try {
+    const produits = await prisma.produit.findMany({
+      orderBy: { nom: 'asc' },
+    });
+    return produits;
+  } catch (error) {
+    server.log.error(error);
+    return reply.code(500).send({ error: 'Erreur serveur' });
+  }
+});
+
 // Dashboard KPIs endpoint
 server.get('/api/dashboard/kpis', async (request, reply) => {
   try {
@@ -733,6 +746,136 @@ server.post('/api/tours/pesee-vide', async (request, reply) => {
   } catch (error) {
     server.log.error(error);
     return reply.code(500).send({ error: 'Erreur lors de la création de la tournée (pesée à vide)' });
+  }
+});
+
+// Step 2: Chargement (Agent Contrôle loads the truck)
+server.patch('/api/tours/:id/chargement', async (request, reply) => {
+  try {
+    const { id } = request.params as any;
+    const {
+      secteurId,
+      secteurNames,
+      agentControleId,
+      nbre_caisses_depart,
+      photo_preuve_depart_url,
+    } = request.body as any;
+    
+    const user = (request as any).user;
+    const finalAgentId = agentControleId || user?.id;
+    
+    if ((!secteurId && !secteurNames) || !nbre_caisses_depart) {
+      return reply.code(400).send({ error: 'Secteur et nombre de caisses sont requis' });
+    }
+    
+    const nbCaisses = parseInt(nbre_caisses_depart);
+    
+    const result = await prisma.$transaction(async (tx) => {
+      const tour = await tx.tour.update({
+        where: { id },
+        data: {
+          secteurId: secteurId || null,
+          secteurs_noms: secteurNames || null,
+          agentControleId: finalAgentId,
+          nbre_caisses_depart: nbCaisses,
+          photo_preuve_depart_url: photo_preuve_depart_url || null,
+          statut: 'PRET_A_PARTIR',
+        },
+        include: {
+          driver: true,
+          secteur: true,
+          agentControle: { select: { email: true, name: true, role: true } },
+        },
+      });
+      
+      const stock = await tx.stockCaisse.findUnique({
+        where: { id: 'stock-principal' }
+      });
+      
+      if (stock && stock.initialise) {
+        const nouveauSolde = stock.stock_actuel - nbCaisses;
+        
+        await tx.stockCaisse.update({
+          where: { id: 'stock-principal' },
+          data: { stock_actuel: nouveauSolde }
+        });
+        
+        await tx.mouvementCaisse.create({
+          data: {
+            type: 'DEPART_TOURNEE',
+            quantite: -nbCaisses,
+            solde_apres: nouveauSolde,
+            tourId: id,
+            userId: finalAgentId,
+            notes: `Chargement: ${nbCaisses} caisses pour tournée`
+          }
+        });
+      }
+      
+      return tour;
+    });
+    
+    return result;
+  } catch (error) {
+    server.log.error(error);
+    return reply.code(500).send({ error: 'Erreur lors du chargement' });
+  }
+});
+
+// Step 5: Retour Sécurité - Security marks arrival (NO weighing)
+server.patch('/api/tours/:id/retour-securite', async (request, reply) => {
+  try {
+    const { id } = request.params as any;
+    const body = (request.body || {}) as any;
+    
+    const user = (request as any).user;
+    const securiteIdEntree = body?.securiteIdEntree || user?.id;
+    
+    const updateData: any = {
+      date_retour_securite: new Date(),
+      statut: 'RETOUR',
+    };
+    
+    if (securiteIdEntree) {
+      updateData.securiteIdEntree = securiteIdEntree;
+    }
+    
+    const tour = await prisma.tour.update({
+      where: { id },
+      data: updateData,
+      include: {
+        driver: true,
+        secteur: true,
+      },
+    });
+    
+    return tour;
+  } catch (error) {
+    server.log.error(error);
+    return reply.code(500).send({ error: 'Erreur lors du marquage d\'arrivée' });
+  }
+});
+
+// Signal vehicle arrival back at site
+server.patch('/api/tours/:id/arrivee', async (request, reply) => {
+  try {
+    const { id } = request.params as any;
+    
+    const tour = await prisma.tour.update({
+      where: { id },
+      data: {
+        statut: 'EN_ATTENTE_DECHARGEMENT',
+      },
+      include: {
+        driver: true,
+        secteur: true,
+      },
+    });
+    
+    return tour;
+  } catch (error) {
+    server.log.error(error);
+    return reply.code(500).send({ error: 'Erreur lors du signalement d\'arrivée' });
   }
 });
 
@@ -1129,6 +1272,43 @@ server.get('/api/conflicts/:id', async (request, reply) => {
   } catch (error: any) {
     console.error('Error loading conflict:', error.message);
     return reply.code(500).send({ error: 'Erreur lors du chargement du conflit' });
+  }
+});
+
+// Update conflict (Direction)
+server.patch('/api/conflicts/:id', async (request, reply) => {
+  try {
+    const { id } = request.params as any;
+    const {
+      notes_direction,
+      direction_id_approbation,
+      statut,
+    } = request.body as any;
+    
+    const updateData: any = {};
+    if (notes_direction !== undefined) updateData.notes_direction = notes_direction;
+    if (direction_id_approbation) updateData.direction_id_approbation = direction_id_approbation;
+    if (statut) {
+      updateData.statut = statut;
+      updateData.date_approbation_direction = new Date();
+    }
+    
+    const conflict = await prisma.conflict.update({
+      where: { id },
+      data: updateData,
+      include: {
+        tour: {
+          include: {
+            driver: true,
+          },
+        },
+      },
+    });
+    
+    return conflict;
+  } catch (error) {
+    server.log.error(error);
+    return reply.code(500).send({ error: 'Erreur lors de la mise à jour du conflit' });
   }
 });
 
