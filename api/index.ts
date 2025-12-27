@@ -1378,7 +1378,7 @@ server.post('/api/admin/backfill-conflicts', async (request, reply) => {
         tour: {
           include: {
             driver: true,
-            mouvements: {
+            mouvementsCaisse: {
               where: { type: 'PERTE_CONFIRMEE' }
             }
           }
@@ -1388,7 +1388,7 @@ server.post('/api/admin/backfill-conflicts', async (request, reply) => {
     
     // Filter conflicts that don't have a PERTE_CONFIRMEE mouvement
     const conflictsWithoutMouvement = conflicts.filter(c => 
-      !c.tour?.mouvements || c.tour.mouvements.length === 0
+      !c.tour?.mouvementsCaisse || c.tour.mouvementsCaisse.length === 0
     );
     
     if (conflictsWithoutMouvement.length === 0) {
