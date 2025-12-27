@@ -46,7 +46,7 @@ export default async function tourRoutes(fastify: FastifyInstance) {
           driver_id, secteur_id, agent_controle_id,
           nbre_caisses_depart, poids_net_produits_depart,
           matricule_vehicule, statut
-        ) VALUES ($1, $2, $3, $4, $5, $6, 'EN_CHARGEMENT')
+        ) VALUES ($1, $2, $3, $4, $5, $6, 'PREPARATION')
         RETURNING *`,
         [driver_id, secteur_id, user.id, nbre_caisses_depart, poids_net_produits_depart, matricule_vehicule]
       );

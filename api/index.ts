@@ -211,6 +211,133 @@ server.get('/api/drivers', async (request, reply) => {
   }
 });
 
+// Get driver by matricule
+server.get('/api/drivers/by-matricule', async (request, reply) => {
+  try {
+    const { matricule } = request.query as any;
+    
+    if (!matricule) {
+      return reply.code(400).send({ error: 'Matricule requis' });
+    }
+    
+    // Find driver that has this matricule as default
+    const driver = await prisma.driver.findFirst({
+      where: { matricule_par_defaut: matricule },
+    });
+    
+    if (driver) {
+      return { driver };
+    }
+    
+    // If not found by default matricule, check in recent tours
+    const recentTour = await prisma.tour.findFirst({
+      where: { matricule_vehicule: matricule },
+      orderBy: { createdAt: 'desc' },
+      include: { driver: true },
+    });
+    
+    if (recentTour?.driver) {
+      return { driver: recentTour.driver };
+    }
+    
+    return { driver: null };
+  } catch (error) {
+    server.log.error(error);
+    return reply.code(500).send({ error: 'Erreur serveur' });
+  }
+});
+
+// Stock API endpoint
+server.get('/api/stock', async (request, reply) => {
+  try {
+    const { page = '1', limit = '10' } = request.query as { page?: string; limit?: string };
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const skip = (pageNum - 1) * limitNum;
+    
+    const stock = await prisma.stockCaisse.findUnique({
+      where: { id: 'stock-principal' }
+    });
+    
+    if (!stock) {
+      return { initialise: false, stockActuel: 0, stockInitial: 0, stockEnTournee: 0 };
+    }
+    
+    // Calculate stock en tournee from active tours
+    const activeTours = await prisma.tour.findMany({
+      where: {
+        statut: { notIn: ['TERMINEE'] }
+      },
+      select: { nbre_caisses_depart: true, nbre_caisses_retour: true }
+    });
+    
+    const stockEnTournee = activeTours.reduce((sum, t) => {
+      const depart = t.nbre_caisses_depart || 0;
+      const retour = t.nbre_caisses_retour || 0;
+      return sum + (depart - retour);
+    }, 0);
+    
+    // Calculate stock perdu from confirmed losses in mouvements
+    const pertesResult = await prisma.mouvementCaisse.aggregate({
+      where: { type: 'PERTE_CONFIRMEE' },
+      _sum: { quantite: true }
+    });
+    const stockPerdu = Math.abs(pertesResult._sum.quantite || 0);
+    
+    // Calculate total sorties (departs - retours)
+    const departResult = await prisma.mouvementCaisse.aggregate({
+      where: { type: 'DEPART_TOURNEE' },
+      _sum: { quantite: true }
+    });
+    const retourResult = await prisma.mouvementCaisse.aggregate({
+      where: { type: 'RETOUR_TOURNEE' },
+      _sum: { quantite: true }
+    });
+    const totalDeparts = Math.abs(departResult._sum.quantite || 0);
+    const totalRetours = retourResult._sum.quantite || 0;
+    const sortiesTournees = totalDeparts - totalRetours - stockPerdu;
+    
+    // Get paginated mouvements
+    const totalMouvements = await prisma.mouvementCaisse.count();
+    const mouvements = await prisma.mouvementCaisse.findMany({
+      skip,
+      take: limitNum,
+      orderBy: { createdAt: 'desc' },
+      include: { tour: { select: { matricule_vehicule: true, driver: { select: { nom_complet: true } } } } }
+    });
+    
+    return {
+      initialise: stock.initialise,
+      stockActuel: stock.stock_actuel,
+      stockInitial: stock.stock_initial || 0,
+      stockEnTournee,
+      stockPerdu,
+      sortiesTournees: Math.max(0, sortiesTournees),
+      stockDisponible: stock.stock_actuel - stockEnTournee,
+      seuilAlerte: stock.seuil_alerte_pct || 20,
+      mouvements: mouvements.map(m => ({
+        id: m.id,
+        type: m.type,
+        quantite: m.quantite,
+        soldeApres: m.solde_apres,
+        notes: m.notes,
+        matricule: m.tour?.matricule_vehicule,
+        chauffeurNom: m.tour?.driver?.nom_complet,
+        createdAt: m.createdAt
+      })),
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total: totalMouvements,
+        totalPages: Math.ceil(totalMouvements / limitNum)
+      }
+    };
+  } catch (error) {
+    server.log.error(error);
+    return reply.code(500).send({ error: 'Erreur serveur' });
+  }
+});
+
 // Get secteurs  
 server.get('/api/secteurs', async (request, reply) => {
   try {
@@ -263,10 +390,10 @@ server.get('/api/dashboard/kpis', async (request, reply) => {
           createdAt: { gte: today, lt: tomorrow }
         }
       }),
-      // Tours waiting (PESEE_VIDE, EN_CHARGEMENT, PRET_A_PARTIR, EN_ATTENTE_*)
+      // Tours waiting (PREPARATION, PRET_A_PARTIR, EN_ATTENTE_*)
       prisma.tour.count({
         where: {
-          statut: { in: ['PESEE_VIDE', 'EN_CHARGEMENT', 'PRET_A_PARTIR', 'EN_ATTENTE_DECHARGEMENT', 'EN_ATTENTE_HYGIENE'] },
+          statut: { in: ['PREPARATION', 'PRET_A_PARTIR', 'EN_ATTENTE_DECHARGEMENT', 'EN_ATTENTE_HYGIENE'] },
           createdAt: { gte: today, lt: tomorrow }
         }
       }),
@@ -542,8 +669,76 @@ server.get('/api/matricules/next-serie', async (request, reply) => {
   }
 });
 
-// Create tour (mobile app)
+// ==================== NEW FLOW ====================
+// 1. Security: Pesée à vide (empty weighing) - CREATES the tour
+// 2. Agent Contrôle: Chargement (loading caisses)
+// 3. Security: Pesée sortie (loaded weighing)
+// 4. Driver on tour: EN_TOURNEE
+// 5. Security: Mark arrival (NO weighing)
+// 6. Agent Contrôle: Déchargement (unloading, count caisses)
+// 7. Agent Hygiène: If chicken products
+// 8. TERMINEE
+
+// Step 1: Create tour with pesée à vide (Security)
+server.post('/api/tours/pesee-vide', async (request, reply) => {
+  try {
+    const {
+      matricule_vehicule,
+      poids_a_vide,
+      driverId,
+      driverName,
+      marque_vehicule,
+      securiteId,
+    } = request.body as any;
+    
+    // Get user from JWT if securiteId not provided
+    const user = (request as any).user;
+    const finalSecuriteId = securiteId || user?.id;
+    
+    // Validation
+    if (!matricule_vehicule || poids_a_vide === undefined) {
+      return reply.code(400).send({ error: 'Matricule et poids à vide sont requis' });
+    }
+    
+    // Handle driver - create new if not exists
+    let finalDriverId = driverId;
+    if (!driverId && driverName) {
+      // Create new driver
+      const newDriver = await prisma.driver.create({
+        data: {
+          nom_complet: driverName,
+          matricule_par_defaut: matricule_vehicule,
+          marque_vehicule: marque_vehicule || null,
+        },
+      });
+      finalDriverId = newDriver.id;
+    }
+    
+    const tour = await prisma.tour.create({
+      data: {
+        driverId: finalDriverId || null,
+        matricule_vehicule,
+        poids_a_vide: parseFloat(poids_a_vide),
+        date_pesee_vide: new Date(),
+        securiteIdSortie: finalSecuriteId, // Security who created the tour
+        statut: 'PESEE_VIDE',
+      },
+      include: {
+        driver: true,
+        securiteSortie: { select: { email: true, name: true, role: true } },
+      },
+    });
+    
+    return tour;
+  } catch (error) {
+    server.log.error(error);
+    return reply.code(500).send({ error: 'Erreur lors de la création de la tournée (pesée à vide)' });
+  }
+});
+
+// Create tour (mobile app) - DEPRECATED: Use /api/tours/pesee-vide instead
 server.post('/api/tours/create', async (request, reply) => {
+  console.log('[DEPRECATED] /api/tours/create called - use /api/tours/pesee-vide instead');
   try {
     const {
       secteurId,
@@ -626,7 +821,7 @@ server.post('/api/tours/create', async (request, reply) => {
         nbre_caisses_depart: parseInt(nbre_caisses_depart),
         poids_net_produits_depart: parseFloat(poids_net_produits_depart) || 0,
         photo_preuve_depart_url: photoUrl,
-        statut: 'EN_CHARGEMENT',
+        statut: 'PREPARATION',
         agentControleId,
         driverId: finalDriverId,
       },
