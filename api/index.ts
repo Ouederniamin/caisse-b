@@ -1369,6 +1369,84 @@ server.post('/api/conflicts/:id/approve', async (request, reply) => {
   }
 });
 
+// Backfill existing conflicts - create PERTE_CONFIRMEE mouvements for conflicts without one
+server.post('/api/admin/backfill-conflicts', async (request, reply) => {
+  try {
+    // Get all conflicts that don't have a corresponding PERTE_CONFIRMEE mouvement
+    const conflicts = await prisma.conflict.findMany({
+      include: {
+        tour: {
+          include: {
+            driver: true,
+            mouvements: {
+              where: { type: 'PERTE_CONFIRMEE' }
+            }
+          }
+        }
+      }
+    });
+    
+    // Filter conflicts that don't have a PERTE_CONFIRMEE mouvement
+    const conflictsWithoutMouvement = conflicts.filter(c => 
+      !c.tour?.mouvements || c.tour.mouvements.length === 0
+    );
+    
+    if (conflictsWithoutMouvement.length === 0) {
+      return { message: 'Aucun conflit à traiter', processed: 0 };
+    }
+    
+    // Get current stock
+    let stockCaisse = await prisma.stockCaisse.findFirst();
+    if (!stockCaisse) {
+      stockCaisse = await prisma.stockCaisse.create({
+        data: { stock_actuel: 0 }
+      });
+    }
+    
+    let currentStock = stockCaisse.stock_actuel;
+    const results: any[] = [];
+    
+    for (const conflict of conflictsWithoutMouvement) {
+      const quantite = conflict.quantite_perdue;
+      currentStock -= quantite;
+      
+      // Create PERTE_CONFIRMEE mouvement
+      const mouvement = await prisma.mouvementCaisse.create({
+        data: {
+          type: 'PERTE_CONFIRMEE',
+          quantite: -quantite,
+          solde_apres: currentStock,
+          tourId: conflict.tourId,
+          notes: `PERTE (backfill): ${quantite} caisses manquantes - ${conflict.tour?.driver?.nom_complet || 'N/A'}`,
+        }
+      });
+      
+      results.push({
+        conflictId: conflict.id,
+        tourId: conflict.tourId,
+        quantite_perdue: quantite,
+        mouvementId: mouvement.id
+      });
+    }
+    
+    // Update stock with total deductions
+    await prisma.stockCaisse.update({
+      where: { id: stockCaisse.id },
+      data: { stock_actuel: currentStock }
+    });
+    
+    return {
+      message: `${results.length} conflits traités`,
+      processed: results.length,
+      new_stock: currentStock,
+      details: results
+    };
+  } catch (error: any) {
+    console.error('Error backfilling conflicts:', error.message);
+    return reply.code(500).send({ error: 'Erreur lors du backfill', details: error.message });
+  }
+});
+
 // Reject conflict (Direction)
 server.post('/api/conflicts/:id/reject', async (request, reply) => {
   try {
