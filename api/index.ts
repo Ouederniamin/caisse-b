@@ -263,10 +263,10 @@ server.get('/api/dashboard/kpis', async (request, reply) => {
           createdAt: { gte: today, lt: tomorrow }
         }
       }),
-      // Tours waiting (PREPARATION, PRET_A_PARTIR, EN_ATTENTE_*)
+      // Tours waiting (PESEE_VIDE, EN_CHARGEMENT, PRET_A_PARTIR, EN_ATTENTE_*)
       prisma.tour.count({
         where: {
-          statut: { in: ['PREPARATION', 'PRET_A_PARTIR', 'EN_ATTENTE_DECHARGEMENT', 'EN_ATTENTE_HYGIENE'] },
+          statut: { in: ['PESEE_VIDE', 'EN_CHARGEMENT', 'PRET_A_PARTIR', 'EN_ATTENTE_DECHARGEMENT', 'EN_ATTENTE_HYGIENE'] },
           createdAt: { gte: today, lt: tomorrow }
         }
       }),
@@ -626,7 +626,7 @@ server.post('/api/tours/create', async (request, reply) => {
         nbre_caisses_depart: parseInt(nbre_caisses_depart),
         poids_net_produits_depart: parseFloat(poids_net_produits_depart) || 0,
         photo_preuve_depart_url: photoUrl,
-        statut: 'PREPARATION',
+        statut: 'EN_CHARGEMENT',
         agentControleId,
         driverId: finalDriverId,
       },
